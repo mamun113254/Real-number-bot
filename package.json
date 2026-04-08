@@ -1,0 +1,16 @@
+{
+  "name": "real-number-bot",
+  "version": "1.0.0",
+  "description": "Telegram OTP Number Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.15.3",
+    "otplib": "^12.0.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
