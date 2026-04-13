@@ -16,13 +16,15 @@ else
     echo "✅ Node.js already available: $(node -v)"
 fi
 
-# Install npm packages
+# Install npm packages (force)
 echo "📦 Installing npm packages..."
-npm install --silent
+npm install
+echo "✅ npm install done"
 
 # Install python packages
 echo "🐍 Installing Python packages..."
-pip install python-telegram-bot==20.7 pyotp --quiet
+pip install "python-telegram-bot==21.3" pyotp --quiet
+echo "✅ Python packages installed"
 
 # Start Baileys server in background
 echo "📱 Starting Baileys server..."
