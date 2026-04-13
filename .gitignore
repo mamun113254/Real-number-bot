@@ -1,6 +1,11 @@
 node_modules/
-wa_sessions/
+__pycache__/
+*.pyc
+*.pyo
+.env
 *.json
 !package.json
 *.txt
-.env
+!requirements.txt
+auth_info_baileys/
+sessions/
