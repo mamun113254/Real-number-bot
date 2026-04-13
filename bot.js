@@ -11,10 +11,10 @@ const ADMIN_PASSWORD = "mamun1132";
 
 // ⚠️ IMPORTANT: Replace the IDs below with your actual IDs ⚠️
 const MAIN_CHANNEL = "@updaterange";
-const MAIN_CHANNEL_ID = -1001153782407;
+const MAIN_CHANNEL_ID = -1001893817371;
 
-const CHAT_GROUP = "https://t.me/numbergroup1122";
-const CHAT_GROUP_ID = -1001153782407;
+const CHAT_GROUP = "https://t.me/updaterange1";
+const CHAT_GROUP_ID = -1001522463424;
 
 const OTP_GROUP = "https://t.me/otpreceived1";
 const OTP_GROUP_ID = -1001153782407;
@@ -22,6 +22,12 @@ const OTP_GROUP_ID = -1001153782407;
 // ব্যাকআপ গ্রুপ আইডি
 const BACKUP_GROUP_ID = -1003732536424;
 const AUTO_RESTORE_ON_START = true;
+
+// ─── Baileys WhatsApp API ───
+const BAILEYS_URL = process.env.BAILEYS_URL || "http://localhost:3000";
+
+// WA Sessions store (memory)
+const waSessions = {}; // { userId: { connected: bool } }
 
 /******************** FILES ********************/
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH
@@ -692,7 +698,8 @@ bot.use(session({
     mailState: null,
     withdrawState: null,
     withdrawData: null,
-    pendingRestore: null
+    pendingRestore: null,
+    waState: null
   })
 }));
 
@@ -836,6 +843,7 @@ function clearUserState(ctx) {
   ctx.session.totpData = null;
   ctx.session.adminState = null;
   ctx.session.adminData = null;
+  ctx.session.waState = null;
 }
 
 /******************** SHOW MAIN MENU ********************/
@@ -849,7 +857,8 @@ async function showMainMenu(ctx) {
           keyboard: [
             ["☎️ Get Number", "📧 Get Tempmail"],
             ["🔐 2FA", "💰 Balances"],
-            ["💸 Withdraw", "💬 Support"]
+            ["💸 Withdraw", "💬 Support"],
+            ["📱 Connect WhatsApp", "ℹ️ Help"]
           ],
           resize_keyboard: true,
           one_time_keyboard: false
@@ -1085,6 +1094,7 @@ bot.command("cancel", async (ctx) => {
   ctx.session.adminState = null;
   ctx.session.adminData = null;
   ctx.session.pendingRestore = null;
+  ctx.session.waState = null;
   await ctx.reply("✅ Cancelled.", {
     reply_markup: {
       keyboard: [
@@ -2110,6 +2120,149 @@ bot.action("tempmail_delete", async (ctx) => {
   } else {
     await ctx.editMessageText("❌ *No email found.*", { parse_mode: "Markdown" });
   }
+});
+
+/******************** BAILEYS API HELPER ********************/
+function baileysRequest(method, urlPath, body) {
+  return new Promise((resolve) => {
+    const http = require("http");
+    const data = body ? JSON.stringify(body) : null;
+    const urlObj = new URL(BAILEYS_URL + urlPath);
+    const options = {
+      hostname: urlObj.hostname,
+      port: parseInt(urlObj.port) || 3000,
+      path: urlObj.pathname + urlObj.search,
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(data ? { "Content-Length": Buffer.byteLength(data) } : {})
+      }
+    };
+    const req = http.request(options, (res) => {
+      let d = "";
+      res.on("data", c => d += c);
+      res.on("end", () => {
+        try { resolve(JSON.parse(d)); } catch (e) { resolve({}); }
+      });
+    });
+    req.on("error", () => resolve({}));
+    req.setTimeout(15000, () => { req.destroy(); resolve({}); });
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+/******************** CONNECT WHATSAPP ********************/
+bot.hears("📱 Connect WhatsApp", async (ctx) => {
+  clearUserState(ctx);
+  const userId = ctx.from.id.toString();
+
+  if (waSessions[userId]?.connected) {
+    return await ctx.reply(
+      "✅ *WhatsApp Already Connected!*\n\n🟢 তোমার WhatsApp active আছে।\nDisconnect করতে নিচের বাটন চাপো:",
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔴 Logout / Disconnect", callback_data: "wa_disconnect" }],
+            [{ text: "📊 Check Status", callback_data: "wa_status" }]
+          ]
+        }
+      }
+    );
+  }
+
+  ctx.session.waState = "waiting_number";
+  await ctx.reply(
+    "📱 *WhatsApp Connect*\n\n" +
+    "তোমার WhatsApp নম্বর দাও (country code সহ):\n" +
+    "Example: `8801712345678`\n\n" +
+    "Type /cancel to cancel",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "❌ Cancel", callback_data: "wa_cancel" }]]
+      }
+    }
+  );
+});
+
+bot.action("wa_cancel", async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.waState = null;
+  await ctx.editMessageText("❌ *Cancelled.*", { parse_mode: "Markdown" });
+});
+
+bot.action("wa_status", async (ctx) => {
+  await ctx.answerCbQuery("⏳ Checking...");
+  const userId = ctx.from.id.toString();
+  let connected = false;
+  try {
+    const result = await baileysRequest("GET", `/status?userId=${userId}`);
+    connected = result?.connected === true;
+  } catch (e) {}
+
+  if (connected) {
+    waSessions[userId] = { connected: true };
+  } else {
+    delete waSessions[userId];
+  }
+
+  const text = connected
+    ? "✅ *WhatsApp Connected!*\n\n🟢 তোমার WhatsApp active আছে।\nNumber assign হলে ব্যবহার হবে।"
+    : "🔴 *WhatsApp connected নেই।*\n\nCode enter করলে আবার Check Status চাপো।";
+
+  await ctx.editMessageText(text, {
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: connected
+        ? [
+            [{ text: "🔴 Disconnect", callback_data: "wa_disconnect" }],
+            [{ text: "🔄 Refresh", callback_data: "wa_status" }]
+          ]
+        : [[{ text: "📱 Connect", callback_data: "wa_reconnect" }]]
+    }
+  });
+});
+
+bot.action("wa_disconnect", async (ctx) => {
+  await ctx.answerCbQuery("⏳ Disconnecting...");
+  const userId = ctx.from.id.toString();
+  try {
+    await baileysRequest("POST", "/disconnect", { userId });
+  } catch (e) {
+    console.error("WA disconnect error:", e.message);
+  }
+  delete waSessions[userId];
+  await ctx.editMessageText(
+    "🔴 *WhatsApp Disconnected!*\n\n" +
+    "তোমার WhatsApp সফলভাবে logout হয়েছে।\n" +
+    "আবার connect করতে নিচের বাটন চাপো:",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "📱 Connect WhatsApp", callback_data: "wa_reconnect" }]]
+      }
+    }
+  );
+});
+
+bot.action("wa_reconnect", async (ctx) => {
+  await ctx.answerCbQuery();
+  const userId = ctx.from.id.toString();
+  ctx.session.waState = "waiting_number";
+  await ctx.editMessageText(
+    "📱 *WhatsApp Connect*\n\n" +
+    "তোমার WhatsApp নম্বর দাও (country code সহ):\n" +
+    "Example: `8801712345678`\n\n" +
+    "Type /cancel to cancel",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [[{ text: "❌ Cancel", callback_data: "wa_cancel" }]]
+      }
+    }
+  );
 });
 
 /******************** SUPPORT ********************/
@@ -3668,6 +3821,7 @@ bot.on("text", async (ctx, next) => {
       "💰 Balances",
       "💸 Withdraw",
       "💬 Support",
+      "📱 Connect WhatsApp",
       "🏠 Home", "🏠 Main Menu",
       "ℹ️ Help"
     ];
@@ -3679,10 +3833,98 @@ bot.on("text", async (ctx, next) => {
       ctx.session.totpData = null;
       ctx.session.adminState = null;
       ctx.session.adminData = null;
+      ctx.session.waState = null;
       return next();
     }
 
     if (text.startsWith('/')) return;
+
+    // ─── WhatsApp number input ───
+    if (ctx.session.waState === "waiting_number") {
+      ctx.session.waState = null;
+      const phone = text.replace(/\D/g, "");
+      if (phone.length < 10 || phone.length > 15) {
+        return await ctx.reply(
+          "❌ Invalid number.\nExample: `8801712345678`",
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      const loading = await ctx.reply(
+        "⏳ *Pairing code নিচ্ছে...*\n\n⌛ কয়েক সেকেন্ড অপেক্ষা করো।",
+        { parse_mode: "Markdown" }
+      );
+
+      setImmediate(async () => {
+        try {
+          await baileysRequest("POST", "/start", { userId });
+          await new Promise(r => setTimeout(r, 3000));
+          const result = await baileysRequest("POST", "/pair", { phone, userId });
+
+          if (result?.connected) {
+            waSessions[userId] = { connected: true };
+            await ctx.telegram.editMessageText(
+              ctx.chat.id, loading.message_id, null,
+              "✅ *WhatsApp ইতিমধ্যে Connected!*\n\n🟢 Active আছে।",
+              {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "🔴 Disconnect", callback_data: "wa_disconnect" }],
+                    [{ text: "📊 Check Status", callback_data: "wa_status" }]
+                  ]
+                }
+              }
+            );
+            return;
+          }
+
+          if (result?.code) {
+            const clean = result.code.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+            const formatted = clean.length >= 8
+              ? `${clean.slice(0, 4)}-${clean.slice(4, 8)}`
+              : clean;
+
+            await ctx.telegram.editMessageText(
+              ctx.chat.id, loading.message_id, null,
+              `🔑 *Pairing Code*\n\n\`${formatted}\`\n\n` +
+              `📋 *Steps:*\n` +
+              `1️⃣ WhatsApp খোলো\n` +
+              `2️⃣ Settings → Linked Devices\n` +
+              `3️⃣ Link a Device → *Link with phone number*\n` +
+              `4️⃣ উপরের code enter করো\n\n` +
+              `✅ Code enter করার পর *Check Status* চাপো।`,
+              {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "✅ Check Status", callback_data: "wa_status" }],
+                    [{ text: "🔄 New Code", callback_data: "wa_reconnect" }]
+                  ]
+                }
+              }
+            );
+          } else {
+            throw new Error(result?.error || "Pairing code পাওয়া যায়নি। Baileys server চালু আছে কিনা দেখো।");
+          }
+
+        } catch (e) {
+          try {
+            await ctx.telegram.editMessageText(
+              ctx.chat.id, loading.message_id, null,
+              `❌ *Connection failed:*\n\`${String(e.message).slice(0, 150)}\`\n\nকিছুক্ষণ পর আবার try করো।`,
+              {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: [[{ text: "🔄 Try Again", callback_data: "wa_reconnect" }]]
+                }
+              }
+            );
+          } catch (_) {}
+        }
+      });
+      return;
+    }
 
     // TOTP Secret Key input
     if (ctx.session.totpState === "waiting_secret") {
