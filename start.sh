@@ -1,17 +1,14 @@
 #!/bin/bash
+echo "🔧 Installing Node.js..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
+apt-get install -y nodejs 2>/dev/null || true
+
+echo "📦 Installing npm packages..."
+npm install
+
 echo "🚀 Starting services..."
-
-# Start Baileys WhatsApp server in background
 node baileys_server.js &
-BAILEYS_PID=$!
-echo "✅ Baileys server started (PID: $BAILEYS_PID)"
+echo "✅ Baileys server started (PID: $!)"
 
-# Wait a bit for baileys to initialize
-sleep 3
-
-# Start Telegram bot
 echo "✅ Starting Telegram bot..."
-node bot.js
-
-# If bot exits, kill baileys too
-kill $BAILEYS_PID 2>/dev/null
+python bot.py
