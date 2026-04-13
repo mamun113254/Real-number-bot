@@ -1,0 +1,2653 @@
+"""
+Earning Hub Number Bot - Python Version
+All features: Numbers, WhatsApp Check, OTP, Earnings, Withdraw, 2FA, TempMail, Admin
+"""
+
+import os
+import json
+import re
+import time
+import asyncio
+import logging
+import urllib.request
+import urllib.parse
+import urllib.error
+import subprocess
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pyotp
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes, ConversationHandler
+)
+
+# â”€â”€â”€ Logging â”€â”€â”€
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+# â”€â”€â”€ Configuration â”€â”€â”€
+BOT_TOKEN = "8657128372:AAFArlAPVAaCEnriPz_3Wn3xc1EQUjldLH8"
+ADMIN_PASSWORD = "mamun1132"
+
+MAIN_CHANNEL     = "@updaterange"
+MAIN_CHANNEL_URL = "https://t.me/updaterange"
+MAIN_CHANNEL_ID  = -1001893817371
+CHAT_GROUP       = "https://t.me/updaterange1"
+CHAT_GROUP_ID    = -1001522463424
+OTP_GROUP        = "https://t.me/otpreceived1"
+OTP_GROUP_ID     = -1001153782407
+
+# â”€â”€â”€ Baileys API (WhatsApp) â”€â”€â”€
+BAILEYS_URL = os.environ.get("BAILEYS_URL", "http://localhost:3000")
+
+# â”€â”€â”€ Data Directory â”€â”€â”€
+DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__)))
+logger.info(f"ðŸ“ Data Directory: {DATA_DIR}")
+
+# â”€â”€â”€ File Paths â”€â”€â”€
+NUMBERS_FILE       = os.path.join(DATA_DIR, "numbers.txt")
+COUNTRIES_FILE     = os.path.join(DATA_DIR, "countries.json")
+USERS_FILE         = os.path.join(DATA_DIR, "users.json")
+SERVICES_FILE      = os.path.join(DATA_DIR, "services.json")
+ACTIVE_NUMBERS_FILE= os.path.join(DATA_DIR, "active_numbers.json")
+OTP_LOG_FILE       = os.path.join(DATA_DIR, "otp_log.json")
+ADMINS_FILE        = os.path.join(DATA_DIR, "admins.json")
+SETTINGS_FILE      = os.path.join(DATA_DIR, "settings.json")
+TOTP_SECRETS_FILE  = os.path.join(DATA_DIR, "totp_secrets.json")
+TEMP_MAILS_FILE    = os.path.join(DATA_DIR, "temp_mails.json")
+EARNINGS_FILE      = os.path.join(DATA_DIR, "earnings.json")
+WITHDRAW_FILE      = os.path.join(DATA_DIR, "withdrawals.json")
+COUNTRY_PRICES_FILE= os.path.join(DATA_DIR, "country_prices.json")
+WA_OWNER_FILE      = os.path.join(DATA_DIR, "wa_owner.json")
+
+# â”€â”€â”€ Default Settings â”€â”€â”€
+DEFAULT_SETTINGS = {
+    "defaultNumberCount": 10,
+    "cooldownSeconds": 5,
+    "requireVerification": True,
+    "minWithdraw": 50,
+    "defaultOtpPrice": 0.25,
+    "withdrawMethods": ["bKash", "Nagad"],
+    "withdrawEnabled": True
+}
+
+# â”€â”€â”€ Load/Save Helpers â”€â”€â”€
+def load_json(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading {path}: {e}")
+    return default
+
+def save_json(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving {path}: {e}")
+
+# â”€â”€â”€ Load Data â”€â”€â”€
+settings       = load_json(SETTINGS_FILE, DEFAULT_SETTINGS)
+users          = load_json(USERS_FILE, {})
+active_numbers = load_json(ACTIVE_NUMBERS_FILE, {})
+otp_log        = load_json(OTP_LOG_FILE, [])
+admins         = load_json(ADMINS_FILE, [])
+totp_secrets   = load_json(TOTP_SECRETS_FILE, {})
+temp_mails     = load_json(TEMP_MAILS_FILE, {})
+earnings       = load_json(EARNINGS_FILE, {})
+withdrawals    = load_json(WITHDRAW_FILE, [])
+country_prices = load_json(COUNTRY_PRICES_FILE, {})
+wa_sessions    = {}  # { user_id: { connected: bool } }
+
+countries = load_json(COUNTRIES_FILE, {
+    "880": {"name": "Bangladesh", "flag": "ðŸ‡§ðŸ‡©"},
+    "91":  {"name": "India",      "flag": "ðŸ‡®ðŸ‡³"},
+    "92":  {"name": "Pakistan",   "flag": "ðŸ‡µðŸ‡°"},
+    "1":   {"name": "USA",        "flag": "ðŸ‡ºðŸ‡¸"},
+    "44":  {"name": "UK",         "flag": "ðŸ‡¬ðŸ‡§"},
+    "977": {"name": "Nepal",      "flag": "ðŸ‡³ðŸ‡µ"},
+})
+
+services = load_json(SERVICES_FILE, {
+    "whatsapp":    {"name": "WhatsApp",    "icon": "ðŸ“±"},
+    "telegram":    {"name": "Telegram",    "icon": "âœˆï¸"},
+    "facebook":    {"name": "Facebook",    "icon": "ðŸ“˜"},
+    "instagram":   {"name": "Instagram",   "icon": "ðŸ“¸"},
+    "google":      {"name": "Google",      "icon": "ðŸ”"},
+    "verification":{"name": "Verification","icon": "âœ…"},
+    "other":       {"name": "Other",       "icon": "ðŸ”§"},
+})
+
+numbers_by_cs = {}  # { country_code: { service: [numbers] } }
+
+def load_numbers():
+    global numbers_by_cs
+    numbers_by_cs = {}
+    if not os.path.exists(NUMBERS_FILE):
+        return
+    try:
+        with open(NUMBERS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" in line:
+                    parts = line.split("|")
+                    if len(parts) >= 3:
+                        num, cc, svc = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                    elif len(parts) == 2:
+                        num, cc, svc = parts[0].strip(), parts[1].strip(), "other"
+                    else:
+                        continue
+                else:
+                    num = line
+                    cc  = get_country_code_from_number(num)
+                    svc = "other"
+                if not re.match(r"^\d{10,15}$", num):
+                    continue
+                if not cc:
+                    continue
+                numbers_by_cs.setdefault(cc, {}).setdefault(svc, [])
+                if num not in numbers_by_cs[cc][svc]:
+                    numbers_by_cs[cc][svc].append(num)
+        total = sum(len(nums) for cc in numbers_by_cs.values() for nums in cc.values())
+        logger.info(f"âœ… Loaded {total} numbers")
+    except Exception as e:
+        logger.error(f"Error loading numbers: {e}")
+
+def save_numbers():
+    try:
+        lines = []
+        for cc, svcs in numbers_by_cs.items():
+            for svc, nums in svcs.items():
+                for num in nums:
+                    lines.append(f"{num}|{cc}|{svc}")
+        with open(NUMBERS_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception as e:
+        logger.error(f"Error saving numbers: {e}")
+
+load_numbers()
+
+# â”€â”€â”€ Save Functions â”€â”€â”€
+def save_settings():    save_json(SETTINGS_FILE, settings)
+def save_users():       save_json(USERS_FILE, users)
+def save_active():      save_json(ACTIVE_NUMBERS_FILE, active_numbers)
+def save_otp_log():     save_json(OTP_LOG_FILE, otp_log[-1000:])
+def save_admins():      save_json(ADMINS_FILE, admins)
+def save_totp():        save_json(TOTP_SECRETS_FILE, totp_secrets)
+def save_temp_mails():  save_json(TEMP_MAILS_FILE, temp_mails)
+def save_earnings():    save_json(EARNINGS_FILE, earnings)
+def save_withdrawals(): save_json(WITHDRAW_FILE, withdrawals)
+def save_cp():          save_json(COUNTRY_PRICES_FILE, country_prices)
+def save_countries():   save_json(COUNTRIES_FILE, countries)
+def save_services():    save_json(SERVICES_FILE, services)
+
+if not os.path.exists(SETTINGS_FILE):
+    save_settings()
+if not os.path.exists(COUNTRIES_FILE):
+    save_countries()
+if not os.path.exists(SERVICES_FILE):
+    save_services()
+
+# â”€â”€â”€ Helper Functions â”€â”€â”€
+def is_admin(user_id: str) -> bool:
+    return str(user_id) in admins
+
+def get_country_code_from_number(num: str) -> str:
+    s = str(num)
+    for l in [3, 2, 1]:
+        if s[:l] in countries:
+            return s[:l]
+    return ""
+
+def get_otp_price(cc: str) -> float:
+    return country_prices.get(cc, settings.get("defaultOtpPrice", 0.25))
+
+def get_user_earnings(uid: str) -> dict:
+    uid = str(uid)
+    if uid not in earnings:
+        earnings[uid] = {"balance": 0, "totalEarned": 0, "otpCount": 0}
+    return earnings[uid]
+
+def add_earning(uid: str, cc: str) -> float:
+    uid = str(uid)
+    price = get_otp_price(cc)
+    e = get_user_earnings(uid)
+    e["balance"]      = round(e["balance"] + price, 2)
+    e["totalEarned"]  = round(e["totalEarned"] + price, 2)
+    e["otpCount"]     = e.get("otpCount", 0) + 1
+    save_earnings()
+    return price
+
+def get_time_ago(dt_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        secs = int((now - dt).total_seconds())
+        if secs < 60:   return f"{secs} seconds ago"
+        if secs < 3600: return f"{secs // 60} minutes ago"
+        if secs < 86400:return f"{secs // 3600} hours ago"
+        return f"{secs // 86400} days ago"
+    except:
+        return "unknown"
+
+def get_available_countries_for_service(svc: str) -> list:
+    return [cc for cc, svcs in numbers_by_cs.items()
+            if svc in svcs and svcs[svc] and cc in countries]
+
+def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
+    if cc not in numbers_by_cs or svc not in numbers_by_cs[cc]:
+        return []
+    pool = numbers_by_cs[cc][svc]
+    if len(pool) < count:
+        return []
+    nums = pool[:count]
+    numbers_by_cs[cc][svc] = pool[count:]
+    now = datetime.now(timezone.utc).isoformat()
+    for n in nums:
+        active_numbers[n] = {
+            "userId": str(uid), "countryCode": cc, "service": svc,
+            "assignedAt": now, "lastOTP": None, "otpCount": 0
+        }
+    save_numbers()
+    save_active()
+    return nums
+
+def extract_phone_from_text(text: str):
+    m = re.search(r"\+?(\d{10,15})", text)
+    return m.group(1) if m else None
+
+def find_matching_active_number(text: str):
+    for num in list(active_numbers.keys()):
+        if num in text:
+            return num
+    for num in list(active_numbers.keys()):
+        if num[-8:] in text:
+            return num
+    for num in list(active_numbers.keys()):
+        if num[-6:] in text:
+            return num
+    for num in list(active_numbers.keys()):
+        if num[-4:] in text:
+            return num
+    return None
+
+def extract_otp(text: str):
+    patterns = [
+        r"(?:otp|code|pin|verification|verify|token)[^\d]{0,10}(\d{4,8})",
+        r"(?:is|has|:)\s*(\d{4,8})\b",
+        r"\b(\d{6})\b",
+        r"\b(\d{4})\b",
+    ]
+    for p in patterns:
+        m = re.search(p, text, re.IGNORECASE)
+        if m and 4 <= len(m.group(1)) <= 8:
+            return m.group(1)
+    return None
+
+def generate_totp(secret: str):
+    try:
+        clean = secret.replace(" ", "").upper()
+        totp = pyotp.TOTP(clean)
+        token = totp.now()
+        remaining = 30 - (int(time.time()) % 30)
+        return {"token": token, "timeRemaining": remaining}
+    except:
+        return None
+
+# â”€â”€â”€ Baileys API (WhatsApp) Helpers â”€â”€â”€
+
+# â”€â”€â”€ WhatsApp Global State â”€â”€â”€
+_green_state  = {"authorized": False}
+_green_owner  = load_json(WA_OWNER_FILE, {"uid": None})
+_wa_pair_lock = None
+
+def save_green_owner():
+    save_json(WA_OWNER_FILE, _green_owner)
+
+def baileys_request(method: str, path: str, body=None) -> dict:
+    """Synchronous Baileys API HTTP call"""
+    url     = f"{BAILEYS_URL}{path}"
+    headers = {"Content-Type": "application/json"}
+    data    = json.dumps(body).encode() if body else None
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        logger.error(f"Baileys API error [{path}]: {e}")
+        return {}
+
+async def green_get_state(uid: str = None) -> str:
+    """authorized / notAuthorized â€” per user"""
+    loop   = asyncio.get_event_loop()
+    path   = f"/status?userId={uid}" if uid else "/status?userId=global"
+    result = await loop.run_in_executor(None, lambda: baileys_request("GET", path))
+    if result.get("connected"):
+        return "authorized"
+    return "notAuthorized"
+
+async def green_api_monitor(app):
+    """
+    Background task â€” à¦¸à¦¬ user à¦à¦° Baileys connection à¦ªà¦°à§à¦¯à¦¬à§‡à¦•à§à¦·à¦£à¥¤
+    """
+    logger.info("ðŸŸ¢ Baileys monitor started")
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            for uid in list(wa_sessions.keys()):
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    continue
+                try:
+                    state = await green_get_state(uid)
+                    if state != "authorized":
+                        wa_sessions.pop(uid, None)
+                        logger.warning(f"âš ï¸ Baileys: WhatsApp disconnected! uid={uid}")
+                        try:
+                            await app.bot.send_message(
+                                int(uid),
+                                "âš ï¸ *WhatsApp Disconnected!*\n\n"
+                                "à¦¤à§‹à¦®à¦¾à¦° WhatsApp à¦¥à§‡à¦•à§‡ bot disconnect à¦¹à¦¯à¦¼à§‡à¦›à§‡à¥¤\n"
+                                "à¦†à¦¬à¦¾à¦° connect à¦•à¦°à¦¤à§‡ à¦¨à¦¿à¦šà§‡à¦° button à¦šà¦¾à¦ªà§‹à¥¤",
+                                parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("ðŸ“± Connect WhatsApp", callback_data="wa_connect")
+                                ]])
+                            )
+                        except Exception as e:
+                            logger.error(f"Disconnect notify error uid={uid}: {e}")
+                except Exception as e:
+                    logger.error(f"Baileys monitor error uid={uid}: {e}")
+        except Exception as e:
+            logger.error(f"Baileys monitor loop error: {e}")
+
+async def get_wa_pairing_code(phone: str, user_id: str) -> str:
+    """
+    Baileys pairing code â€” per user sessionà¥¤
+    """
+    digits = re.sub(r"\D", "", phone)
+    logger.info(f"ðŸ“± Baileys pairing for: +{digits} uid={user_id}")
+
+    loop = asyncio.get_event_loop()
+
+    # Session start à¦•à¦°à§‹
+    await loop.run_in_executor(
+        None,
+        lambda: baileys_request("POST", "/start", {"userId": user_id})
+    )
+    await asyncio.sleep(3)
+
+    result = await loop.run_in_executor(
+        None,
+        lambda: baileys_request("POST", "/pair", {"phone": digits, "userId": user_id})
+    )
+    logger.info(f"Baileys pairing result: {result}")
+    if result.get("connected"):
+        raise Exception("WhatsApp à¦‡à¦¤à¦¿à¦®à¦§à§à¦¯à§‡ connected à¦†à¦›à§‡à¥¤")
+    if result.get("code"):
+        code  = str(result["code"])
+        clean = re.sub(r"[^A-Z0-9]", "", code.upper())
+        if len(clean) >= 8:
+            return f"{clean[:4]}-{clean[4:8]}"
+        return code
+    raise Exception(
+        result.get("error") or
+        "Pairing code à¦ªà¦¾à¦“à¦¯à¦¼à¦¾ à¦¯à¦¾à¦¯à¦¼à¦¨à¦¿à¥¤ Baileys server à¦šà¦¾à¦²à§ à¦†à¦›à§‡ à¦•à¦¿à¦¨à¦¾ à¦¦à§‡à¦–à§‹à¥¤"
+    )
+
+async def monitor_wa_connection(uid: str, context):
+    """
+    Pairing à¦à¦° à¦ªà¦° per-user Baileys state poll à¦•à¦°à§‹à¥¤
+    """
+    logger.info(f"ðŸ” Waiting for WA auth: {uid}")
+    for _ in range(60):
+        await asyncio.sleep(5)
+        try:
+            state = await green_get_state(uid)
+            if state == "authorized":
+                wa_sessions[uid] = {"connected": True}
+                logger.info(f"âœ… WA connected: uid={uid}")
+                try:
+                    await context.bot.send_message(
+                        int(uid),
+                        "âœ… *WhatsApp Connected!*\n\n"
+                        "ðŸŸ¢ à¦¤à§‹à¦®à¦¾à¦° WhatsApp à¦¸à¦«à¦²à¦­à¦¾à¦¬à§‡ connect à¦¹à¦¯à¦¼à§‡à¦›à§‡à¥¤\n"
+                        "à¦à¦–à¦¨ numbers assign à¦¹à¦²à§‡ WA check à¦¦à§‡à¦–à¦¾à¦¬à§‡à¥¤\n\n"
+                        "Disconnect à¦•à¦°à¦¤à§‡ à¦¨à¦¿à¦šà§‡à¦° à¦¬à¦¾à¦Ÿà¦¨ à¦šà¦¾à¦ªà§‹:",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("ðŸ”´ Logout / Disconnect", callback_data="wa_disconnect")],
+                            [InlineKeyboardButton("ðŸ“Š Check Status", callback_data="wa_status")],
+                        ])
+                    )
+                except:
+                    pass
+                break
+        except Exception as e:
+            logger.warning(f"monitor_wa_connection error: {e}")
+
+async def check_wa_number(phone: str, user_id: str):
+    """
+    Baileys onWhatsApp check â€” per userà¥¤
+    """
+    if not wa_sessions.get(user_id, {}).get("connected"):
+        state = await green_get_state(user_id)
+        if state != "authorized":
+            return None
+        wa_sessions[user_id] = {"connected": True}
+
+    digits = re.sub(r"\D", "", phone)
+    loop   = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: baileys_request("POST", "/check", {"numbers": [digits], "userId": user_id})
+        )
+        logger.info(f"ðŸ“± WA check +{digits}: {result}")
+        results = result.get("results", {})
+        val = results.get(digits)
+        if val is True:  return True
+        if val is False: return False
+        return None
+    except Exception as e:
+        logger.warning(f"check_wa_number error +{digits}: {e}")
+        return None
+
+# â”€â”€â”€ Mail.tm API â”€â”€â”€
+def mailtm_request(method: str, path: str, body=None, token=None):
+    url = f"https://api.mail.tm{path}"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    data = json.dumps(body).encode() if body else None
+
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode())
+            return err
+        except:
+            return None
+    except Exception as e:
+        logger.error(f"Mail.tm error: {e}")
+        return None
+
+def random_str(n: int, chars="abcdefghijklmnopqrstuvwxyz0123456789") -> str:
+    import random
+    return "".join(random.choice(chars) for _ in range(n))
+
+async def create_fresh_email():
+    try:
+        domains = mailtm_request("GET", "/domains?page=1")
+        domain_list = domains if isinstance(domains, list) else (domains or {}).get("hydra:member", [])
+        if not domain_list:
+            return None
+        domain = domain_list[0]["domain"]
+
+        username = random_str(12)
+        password = random_str(16, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        address  = f"{username}@{domain}"
+
+        account = None
+        for _ in range(3):
+            account = mailtm_request("POST", "/accounts", {"address": address, "password": password})
+            if account and account.get("id"):
+                break
+            await asyncio.sleep(3)
+
+        if not account or not account.get("id"):
+            return None
+
+        token_res = mailtm_request("POST", "/token", {"address": address, "password": password})
+        if not token_res or not token_res.get("token"):
+            return None
+
+        return {
+            "address":   address,
+            "sidToken":  token_res["token"],
+            "provider":  "mailtm",
+            "createdAt": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"createFreshEmail error: {e}")
+        return None
+
+async def get_email_inbox(email_obj: dict):
+    try:
+        data = mailtm_request("GET", "/messages?page=1", token=email_obj.get("sidToken"))
+        msgs = data if isinstance(data, list) else (data or {}).get("hydra:member", [])
+        return [{"id": m.get("id"), "from": (m.get("from") or {}).get("address", ""),
+                 "subject": m.get("subject", ""), "date": m.get("createdAt", "")} for m in msgs]
+    except:
+        return []
+
+async def get_email_message(msg_id: str, email_obj: dict) -> str:
+    try:
+        data = mailtm_request("GET", f"/messages/{msg_id}", token=email_obj.get("sidToken"))
+        if not data:
+            return ""
+        text = data.get("text", "")
+        html = (data.get("html") or [""])[0]
+        raw = text or re.sub(r"<[^>]*>", " ", html)
+        return re.sub(r"\s+", " ", raw).strip()
+    except:
+        return ""
+
+# â”€â”€â”€ Membership Check â”€â”€â”€
+async def check_membership(user_id: int, app) -> dict:
+    result = {"mainChannel": False, "chatGroup": False, "otpGroup": False, "allJoined": False}
+    try:
+        m = await app.bot.get_chat_member(MAIN_CHANNEL_ID, user_id)
+        result["mainChannel"] = m.status in ["member", "administrator", "creator"]
+    except Exception as e:
+        logger.warning(f"Main channel check: {e}")
+    try:
+        m = await app.bot.get_chat_member(CHAT_GROUP_ID, user_id)
+        result["chatGroup"] = m.status in ["member", "administrator", "creator"]
+    except Exception as e:
+        logger.warning(f"Chat group check: {e}")
+    try:
+        m = await app.bot.get_chat_member(OTP_GROUP_ID, user_id)
+        result["otpGroup"] = m.status in ["member", "administrator", "creator"]
+    except Exception as e:
+        logger.warning(f"OTP group check: {e}")
+
+    result["allJoined"] = result["mainChannel"] and result["chatGroup"] and result["otpGroup"]
+    return result
+
+# â”€â”€â”€ Keyboards â”€â”€â”€
+def main_keyboard():
+    return ReplyKeyboardMarkup([
+        ["â˜Žï¸ Get Number", "ðŸ“§ Get Tempmail"],
+        ["ðŸ” 2FA", "ðŸ’° Balances"],
+        ["ðŸ’¸ Withdraw", "ðŸ’¬ Support"],
+        ["â„¹ï¸ Help"]
+    ], resize_keyboard=True)
+
+def verify_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("1ï¸âƒ£ ðŸ“¢ Main Channel", url=MAIN_CHANNEL_URL)],
+        [InlineKeyboardButton("2ï¸âƒ£ ðŸ’¬ Number Channel", url=CHAT_GROUP)],
+        [InlineKeyboardButton("3ï¸âƒ£ ðŸ“¨ OTP Group", url=OTP_GROUP)],
+        [InlineKeyboardButton("âœ… VERIFY MEMBERSHIP", callback_data="verify_user")],
+    ])
+
+def admin_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("ðŸ“Š Stock Report", callback_data="admin_stock"),
+         InlineKeyboardButton("ðŸ‘¥ User Stats", callback_data="admin_users")],
+        [InlineKeyboardButton("ðŸ“¢ Broadcast", callback_data="admin_broadcast"),
+         InlineKeyboardButton("ðŸ“‹ OTP Log", callback_data="admin_otp_log")],
+        [InlineKeyboardButton("âž• Add Numbers", callback_data="admin_add_numbers"),
+         InlineKeyboardButton("ðŸ“¤ Upload File", callback_data="admin_upload")],
+        [InlineKeyboardButton("ðŸ—‘ï¸ Delete Numbers", callback_data="admin_delete"),
+         InlineKeyboardButton("ðŸ”§ Manage Services", callback_data="admin_manage_services")],
+        [InlineKeyboardButton("ðŸŒ Manage Countries", callback_data="admin_manage_countries"),
+         InlineKeyboardButton("âš™ï¸ Settings", callback_data="admin_settings")],
+        [InlineKeyboardButton("ðŸ’° Country Prices", callback_data="admin_country_prices"),
+         InlineKeyboardButton("ðŸ’¸ Withdrawals", callback_data="admin_withdrawals")],
+        [InlineKeyboardButton("ðŸ‘› Balance Management", callback_data="admin_balance_manage")],
+        [InlineKeyboardButton("ðŸšª Logout", callback_data="admin_logout")],
+    ])
+
+# â”€â”€â”€ User Session State â”€â”€â”€
+user_sessions = {}  # { user_id: { state, data, verified, is_admin, ... } }
+
+def get_session(uid) -> dict:
+    uid = str(uid)
+    if uid not in user_sessions:
+        user_sessions[uid] = {
+            "verified": False, "is_admin": False,
+            "state": None, "data": None,
+            "current_numbers": [], "current_service": None, "current_country": None,
+            "last_number_time": 0, "last_verification_check": 0,
+        }
+    return user_sessions[uid]
+
+# â”€â”€â”€ Verification Middleware â”€â”€â”€
+async def ensure_verified(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    uid  = str(user.id)
+    sess = get_session(uid)
+
+    if sess["is_admin"] or is_admin(uid):
+        sess["is_admin"] = True
+        return True
+
+    if not settings.get("requireVerification", True):
+        return True
+
+    now = time.time()
+    RECHECK = 2 * 3600
+    if sess["verified"] and (now - sess["last_verification_check"]) < RECHECK:
+        return True
+
+    membership = await check_membership(user.id, context.application)
+    if membership["allJoined"]:
+        sess["verified"] = True
+        sess["last_verification_check"] = now
+        if uid in users:
+            users[uid]["verified"] = True
+            save_users()
+        return True
+
+    sess["verified"] = False
+    msg = (
+        "âš ï¸ *Bot à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦•à¦°à¦¤à§‡ à¦¸à¦•à¦² à¦—à§à¦°à§à¦ªà§‡ join à¦•à¦°à¦¤à§‡ à¦¹à¦¬à§‡!*\n\n"
+        "à¦¨à¦¿à¦šà§‡à¦° à¦¸à¦¬à¦—à§à¦²à§‹à¦¤à§‡ join à¦•à¦°à§à¦¨, à¦¤à¦¾à¦°à¦ªà¦° VERIFY à¦šà¦¾à¦ªà§à¦¨:"
+    )
+    if update.callback_query:
+        await update.callback_query.answer("â›” à¦¸à¦¬ group à¦ join à¦•à¦°à§‹!", show_alert=True)
+        try:
+            await update.callback_query.edit_message_text(msg, parse_mode="Markdown", reply_markup=verify_keyboard())
+        except:
+            await update.effective_message.reply_text(msg, parse_mode="Markdown", reply_markup=verify_keyboard())
+    else:
+        await update.effective_message.reply_text(msg, parse_mode="Markdown", reply_markup=verify_keyboard())
+    return False
+
+# â”€â”€â”€ /start â”€â”€â”€
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        user = update.effective_user
+        uid  = str(user.id)
+
+        if uid not in users:
+            users[uid] = {
+                "id": uid, "username": user.username or "no_username",
+                "first_name": user.first_name or "User",
+                "last_name": user.last_name or "",
+                "joined": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "verified": False,
+            }
+            save_users()
+
+        sess = get_session(uid)
+        sess["state"] = None
+        sess["data"]  = None
+
+        welcome = (
+            f"ðŸ‘‹ *Welcome to Earning Hub Number Bot!*\n\n"
+            f"ðŸ“± Get virtual numbers for OTP verification\n"
+            f"ðŸ’µ Earn money from each OTP received"
+        )
+
+        # If already verified, show main keyboard directly
+        if sess.get("verified") or (uid in users and users[uid].get("verified")):
+            await update.message.reply_text(
+                welcome + "\n\nâœ… Choose an option:", 
+                parse_mode="Markdown", reply_markup=main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                welcome + "\n\nFirst, join all required groups to use the bot:",
+                parse_mode="Markdown", reply_markup=verify_keyboard()
+            )
+    except Exception as e:
+        logger.error(f"cmd_start error: {e}")
+        try:
+            await update.message.reply_text("âš ï¸ Error occurred. Please try again.")
+        except:
+            pass
+
+# â”€â”€â”€ Verify â”€â”€â”€
+async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("â³ Checking...")
+
+    user = update.effective_user
+    uid  = str(user.id)
+    membership = await check_membership(user.id, context.application)
+
+    if membership["allJoined"]:
+        sess = get_session(uid)
+        sess["verified"] = True
+        sess["last_verification_check"] = time.time()
+        # Restore admin status if applicable
+        if is_admin(uid):
+            sess["is_admin"] = True
+        if uid in users:
+            users[uid]["verified"] = True
+            save_users()
+
+        await query.edit_message_text("âœ… *VERIFICATION SUCCESSFUL!*\n\nYou can now use all features.", parse_mode="Markdown")
+        await context.bot.send_message(
+            user.id, "ðŸŽ‰ Welcome! Choose an option:",
+            reply_markup=main_keyboard()
+        )
+    else:
+        msg = "âŒ *VERIFICATION FAILED*\n\n"
+        if not membership["mainChannel"]: msg += "âŒ 1ï¸âƒ£ Main Channel\n"
+        if not membership["chatGroup"]:   msg += "âŒ 2ï¸âƒ£ Number Channel\n"
+        if not membership["otpGroup"]:    msg += "âŒ 3ï¸âƒ£ OTP Group\n"
+        msg += "\nPlease join ALL groups and click VERIFY again."
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=verify_keyboard())
+
+# â”€â”€â”€ Admin Login â”€â”€â”€
+async def cmd_adminlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    parts = update.message.text.split()
+    if len(parts) < 2:
+        return await update.message.reply_text("âŒ Usage: /adminlogin [password]")
+
+    if parts[1] == ADMIN_PASSWORD:
+        uid = str(update.effective_user.id)
+        sess = get_session(uid)
+        sess["is_admin"] = True
+        sess["state"]    = None
+        sess["data"]     = None
+        if uid not in admins:
+            admins.append(uid)
+            save_admins()
+        await update.message.reply_text("âœ… *Admin Login Successful!*\nUse /admin to access panel.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("âŒ Wrong password.")
+
+# â”€â”€â”€ Admin Panel â”€â”€â”€
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    sess = get_session(uid)
+    if not sess["is_admin"] and not is_admin(uid):
+        return await update.message.reply_text("âŒ Use /adminlogin [password] first.")
+    # Reset any leftover state
+    sess["state"] = None
+    sess["data"]  = None
+    await update.message.reply_text("ðŸ›  *Admin Dashboard*\n\nSelect an option:", parse_mode="Markdown", reply_markup=admin_keyboard())
+
+# â”€â”€â”€ GET NUMBERS â”€â”€â”€
+async def handle_get_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_verified(update, context):
+        return
+    sess = get_session(str(update.effective_user.id))
+    sess["state"] = None
+
+    avail = []
+    for svc_id, svc in services.items():
+        ccs = get_available_countries_for_service(svc_id)
+        if ccs:
+            total = sum(len(numbers_by_cs.get(cc, {}).get(svc_id, [])) for cc in ccs)
+            avail.append((svc_id, svc, total))
+
+    if not avail:
+        return await update.message.reply_text("ðŸ“­ *No Numbers Available*\n\nPlease try again later.", parse_mode="Markdown")
+
+    buttons = []
+    for i in range(0, len(avail), 2):
+        row = []
+        row.append(InlineKeyboardButton(
+            f"{avail[i][1]['icon']} {avail[i][1]['name']} ({avail[i][2]})",
+            callback_data=f"svc:{avail[i][0]}"
+        ))
+        if i+1 < len(avail):
+            row.append(InlineKeyboardButton(
+                f"{avail[i+1][1]['icon']} {avail[i+1][1]['name']} ({avail[i+1][2]})",
+                callback_data=f"svc:{avail[i+1][0]}"
+            ))
+        buttons.append(row)
+
+    await update.message.reply_text(
+        "ðŸŽ¯ *Select a Service*\n\n_(number in brackets = available count)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await ensure_verified(update, context):
+        return
+    await query.answer()
+    svc_id = query.data.split(":", 1)[1]
+    svc    = services.get(svc_id, {"name": svc_id, "icon": "ðŸ“ž"})
+    ccs    = sorted(get_available_countries_for_service(svc_id), key=lambda cc: get_otp_price(cc))
+
+    if not ccs:
+        return await query.answer("âŒ No numbers available", show_alert=True)
+
+    buttons = []
+    for i in range(0, len(ccs), 2):
+        row = []
+        cc1 = ccs[i]; c1 = countries[cc1]; p1 = get_otp_price(cc1)
+        row.append(InlineKeyboardButton(f"{c1['flag']} {c1['name']} ({p1:.2f}TK)", callback_data=f"cc:{svc_id}:{cc1}"))
+        if i+1 < len(ccs):
+            cc2 = ccs[i+1]; c2 = countries[cc2]; p2 = get_otp_price(cc2)
+            row.append(InlineKeyboardButton(f"{c2['flag']} {c2['name']} ({p2:.2f}TK)", callback_data=f"cc:{svc_id}:{cc2}"))
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("ðŸ”™ Back", callback_data="back_services")])
+
+    await query.edit_message_text(
+        f"{svc['icon']} *{svc['name']}* â€” Select Country\n\n_(taka = earnings per OTP)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await ensure_verified(update, context):
+        return
+    await query.answer()
+    _, svc_id, cc = query.data.split(":")
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    count = settings.get("defaultNumberCount", 10)
+    now   = time.time()
+
+    cooldown = settings.get("cooldownSeconds", 5)
+    if (now - sess["last_number_time"]) < cooldown and sess["current_numbers"]:
+        remaining = int(cooldown - (now - sess["last_number_time"]))
+        return await query.answer(f"â³ {remaining} à¦¸à§‡à¦•à§‡à¦¨à§à¦¡ à¦…à¦ªà§‡à¦•à§à¦·à¦¾ à¦•à¦°à§‹à¥¤", show_alert=True)
+
+    nums = get_multiple_numbers(cc, svc_id, uid, count)
+    if not nums:
+        return await query.answer("âŒ Not enough numbers available.", show_alert=True)
+
+    # Release old numbers
+    for old in sess["current_numbers"]:
+        active_numbers.pop(old, None)
+    save_active()
+
+    sess["current_numbers"] = nums
+    sess["current_service"] = svc_id
+    sess["current_country"] = cc
+    sess["last_number_time"] = now
+
+    country = countries.get(cc, {"flag": "ðŸŒ", "name": cc})
+    svc     = services.get(svc_id, {"icon": "ðŸ“ž", "name": svc_id})
+    price   = get_otp_price(cc)
+
+    # à¦¶à§à¦§à§ à¦¯à§‡ à¦‡à¦‰à¦œà¦¾à¦° WA connect à¦•à¦°à§‡à¦›à§‡ à¦¸à§‡-à¦‡ WA check à¦ªà¦¾à¦¬à§‡
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
+    nums_text = "\n".join(
+        f"{i+1}. `+{n}`" + (" â³" if wa_connected else "")
+        for i, n in enumerate(nums)
+    )
+
+    def make_msg(nt):
+        return (
+            f"âœ… *{len(nums)} Number(s) Assigned!*\n\n"
+            f"{svc['icon']} *Service:* {svc['name']}\n"
+            f"{country['flag']} *Country:* {country['name']}\n"
+            f"ðŸ’µ *Earnings per OTP:* {price:.2f} taka\n\n"
+            f"ðŸ“ž *Numbers:*\n{nt}\n\n"
+            f"ðŸ“Œ OTP automatically à¦†à¦¸à¦¬à§‡à¥¤"
+            + ("\nðŸ“±=WA à¦†à¦›à§‡ âŒ=à¦¨à§‡à¦‡" if wa_connected else "")
+        )
+
+    buttons = [
+        [InlineKeyboardButton("ðŸ“¨ Open OTP Group", url=OTP_GROUP)],
+        [InlineKeyboardButton("ðŸ”„ Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+        [InlineKeyboardButton("ðŸ”™ Service List", callback_data="back_services")],
+    ]
+    if not wa_connected:
+        buttons.append([InlineKeyboardButton("ðŸ“± Connect WhatsApp", callback_data="wa_connect")])
+
+    await query.edit_message_text(make_msg(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+    # Background à¦ WA check à¦•à¦°à§‹ â€” bot block à¦¹à¦¬à§‡ à¦¨à¦¾
+    if wa_connected:
+        chat_id = query.message.chat_id
+        msg_id  = query.message.message_id
+        async def do_wa_check():
+            # à¦¸à¦¬ number à¦à¦•à¦¸à¦¾à¦¥à§‡ parallel check à¦•à¦°à§‹
+            results = await asyncio.gather(
+                *[check_wa_number(n, uid) for n in nums],
+                return_exceptions=True
+            )
+            res = {n: (r if not isinstance(r, Exception) else None)
+                   for n, r in zip(nums, results)}
+            updated = "\n".join(
+                f"{i+1}. `+{n}`" + (" ðŸ“±" if res.get(n) is True else (" âŒ" if res.get(n) is False else " â¬œ"))
+                for i, n in enumerate(nums)
+            )
+            try:
+                await context.bot.edit_message_text(
+                    make_msg(updated), chat_id=chat_id, message_id=msg_id,
+                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except: pass
+        asyncio.create_task(do_wa_check())
+
+async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not await ensure_verified(update, context):
+        return
+    await query.answer()
+    _, svc_id, cc = query.data.split(":")
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    now  = time.time()
+    cooldown = settings.get("cooldownSeconds", 5)
+
+    if (now - sess["last_number_time"]) < cooldown:
+        remaining = int(cooldown - (now - sess["last_number_time"]))
+        return await query.answer(f"â³ {remaining} à¦¸à§‡à¦•à§‡à¦¨à§à¦¡ à¦…à¦ªà§‡à¦•à§à¦·à¦¾ à¦•à¦°à§‹à¥¤", show_alert=True)
+
+    count = settings.get("defaultNumberCount", 10)
+    nums  = get_multiple_numbers(cc, svc_id, uid, count)
+    if not nums:
+        return await query.answer("âŒ No numbers available.", show_alert=True)
+
+    for old in sess["current_numbers"]:
+        active_numbers.pop(old, None)
+    save_active()
+
+    sess["current_numbers"] = nums
+    sess["last_number_time"] = now
+
+    country = countries.get(cc, {"flag": "ðŸŒ", "name": cc})
+    svc     = services.get(svc_id, {"icon": "ðŸ“ž", "name": svc_id})
+    price   = get_otp_price(cc)
+    # à¦¶à§à¦§à§ à¦¯à§‡ à¦‡à¦‰à¦œà¦¾à¦° WA connect à¦•à¦°à§‡à¦›à§‡ à¦¸à§‡-à¦‡ WA check à¦ªà¦¾à¦¬à§‡
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
+
+    nums_text = "\n".join(
+        f"{i+1}. `+{n}`" + (" â³" if wa_connected else "")
+        for i, n in enumerate(nums)
+    )
+
+    def make_msg_new(nt):
+        return (
+            f"ðŸ”„ *{len(nums)} New Number(s)!*\n\n"
+            f"{svc['icon']} *Service:* {svc['name']}\n"
+            f"{country['flag']} *Country:* {country['name']}\n"
+            f"ðŸ’µ *Earnings per OTP:* {price:.2f} taka\n\n"
+            f"ðŸ“ž *Numbers:*\n{nt}\n\n"
+            f"ðŸ“Œ OTP automatically à¦†à¦¸à¦¬à§‡à¥¤"
+            + ("\nðŸ“±=WA à¦†à¦›à§‡ âŒ=à¦¨à§‡à¦‡" if wa_connected else "")
+        )
+
+    buttons = [
+        [InlineKeyboardButton("ðŸ“¨ Open OTP Group", url=OTP_GROUP)],
+        [InlineKeyboardButton("ðŸ”„ Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+        [InlineKeyboardButton("ðŸ”™ Service List", callback_data="back_services")],
+    ]
+    if not wa_connected:
+        buttons.append([InlineKeyboardButton("ðŸ“± Connect WhatsApp", callback_data="wa_connect")])
+
+    await query.edit_message_text(make_msg_new(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+    if wa_connected:
+        chat_id = query.message.chat_id
+        msg_id  = query.message.message_id
+        async def do_wa_check_new():
+            # à¦¸à¦¬ number à¦à¦•à¦¸à¦¾à¦¥à§‡ parallel check à¦•à¦°à§‹
+            results = await asyncio.gather(
+                *[check_wa_number(n, uid) for n in nums],
+                return_exceptions=True
+            )
+            res = {n: (r if not isinstance(r, Exception) else None)
+                   for n, r in zip(nums, results)}
+            updated = "\n".join(
+                f"{i+1}. `+{n}`" + (" ðŸ“±" if res.get(n) is True else (" âŒ" if res.get(n) is False else " â¬œ"))
+                for i, n in enumerate(nums)
+            )
+            try:
+                await context.bot.edit_message_text(
+                    make_msg_new(updated), chat_id=chat_id, message_id=msg_id,
+                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except: pass
+        asyncio.create_task(do_wa_check_new())
+
+async def cb_back_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    avail = []
+    for svc_id, svc in services.items():
+        ccs = get_available_countries_for_service(svc_id)
+        if ccs:
+            total = sum(len(numbers_by_cs.get(cc, {}).get(svc_id, [])) for cc in ccs)
+            avail.append((svc_id, svc, total))
+
+    buttons = []
+    for i in range(0, len(avail), 2):
+        row = []
+        row.append(InlineKeyboardButton(
+            f"{avail[i][1]['icon']} {avail[i][1]['name']} ({avail[i][2]})",
+            callback_data=f"svc:{avail[i][0]}"
+        ))
+        if i+1 < len(avail):
+            row.append(InlineKeyboardButton(
+                f"{avail[i+1][1]['icon']} {avail[i+1][1]['name']} ({avail[i+1][2]})",
+                callback_data=f"svc:{avail[i+1][0]}"
+            ))
+        buttons.append(row)
+
+    await query.edit_message_text(
+        "ðŸŽ¯ *Select a Service*\n\n_(number in brackets = available count)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+# â”€â”€â”€ BALANCE â”€â”€â”€
+async def handle_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_verified(update, context): return
+    uid = str(update.effective_user.id)
+    e   = get_user_earnings(uid)
+    pending = [w for w in withdrawals if w["userId"] == uid and w["status"] == "pending"]
+    withdrawn = sum(w["amount"] for w in withdrawals if w["userId"] == uid and w["status"] == "approved")
+
+    await update.message.reply_text(
+        f"ðŸ’° *Your Earnings*\n\n"
+        f"ðŸ’µ *Current Balance:* {e['balance']:.2f} taka\n"
+        f"ðŸ“ˆ *Total Earned:* {e['totalEarned']:.2f} taka\n"
+        f"ðŸ“¨ *Total OTPs:* {e.get('otpCount', 0)}\n"
+        f"ðŸ’¸ *Total Withdrawn:* {withdrawn:.2f} taka\n"
+        f"â³ *Pending Withdrawals:* {len(pending)}\n\n"
+        f"ðŸ“Œ *Minimum Withdraw:* {settings['minWithdraw']} taka",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ’¸ Withdraw", callback_data="start_withdraw")],
+            [InlineKeyboardButton("ðŸ“‹ Withdraw History", callback_data="withdraw_history")],
+        ])
+    )
+
+# â”€â”€â”€ WITHDRAW â”€â”€â”€
+async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_verified(update, context): return
+    uid = str(update.effective_user.id)
+    e   = get_user_earnings(uid)
+    sess = get_session(uid)
+    sess["state"] = None
+
+    if not settings.get("withdrawEnabled", True):
+        return await update.message.reply_text("â¸ï¸ *Withdrawals are currently disabled.*", parse_mode="Markdown")
+
+    if e["balance"] < settings["minWithdraw"]:
+        return await update.message.reply_text(
+            f"âŒ *Insufficient balance.*\n\n"
+            f"ðŸ’µ Balance: {e['balance']:.2f} taka\n"
+            f"ðŸ“Œ Minimum: {settings['minWithdraw']} taka",
+            parse_mode="Markdown"
+        )
+
+    await update.message.reply_text(
+        f"ðŸ’¸ *Withdraw*\n\nðŸ’µ Balance: *{e['balance']:.2f} taka*\n\nChoose method:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸŸ£ bKash", callback_data="wm:bKash"),
+             InlineKeyboardButton("ðŸŸ  Nagad", callback_data="wm:Nagad")],
+            [InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")],
+        ])
+    )
+
+async def cb_withdraw_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.split(":", 1)[1]
+    uid    = str(update.effective_user.id)
+    sess   = get_session(uid)
+    e      = get_user_earnings(uid)
+
+    sess["state"] = "w_amount"
+    sess["data"]  = {"method": method}
+
+    amounts = []
+    for a in [settings["minWithdraw"], 100, 200, 500]:
+        if e["balance"] >= a and a not in amounts:
+            amounts.append(a)
+
+    rows = []
+    for i in range(0, len(amounts), 2):
+        row = [InlineKeyboardButton(f"{amounts[i]} taka", callback_data=f"wa:{method}:{amounts[i]}")]
+        if i+1 < len(amounts):
+            row.append(InlineKeyboardButton(f"{amounts[i+1]} taka", callback_data=f"wa:{method}:{amounts[i+1]}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(f"ðŸ’° All ({e['balance']:.2f} taka)", callback_data=f"wa:{method}:{e['balance']:.2f}")])
+    rows.append([InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")])
+
+    icon = "ðŸŸ£" if method == "bKash" else "ðŸŸ "
+    await query.edit_message_text(
+        f"{icon} *{method} Withdrawal*\n\nðŸ’µ Balance: *{e['balance']:.2f} taka*\n\nSelect amount or type in chat:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+async def cb_withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, method, amt_str = query.data.split(":")
+    amount = float(amt_str)
+    uid    = str(update.effective_user.id)
+    sess   = get_session(uid)
+    e      = get_user_earnings(uid)
+
+    if amount < settings["minWithdraw"]:
+        return await query.answer(f"âŒ Minimum {settings['minWithdraw']} taka", show_alert=True)
+    if amount > e["balance"]:
+        return await query.answer("âŒ Insufficient balance!", show_alert=True)
+
+    sess["state"] = "w_account"
+    sess["data"]  = {"method": method, "amount": amount}
+    icon = "ðŸŸ£" if method == "bKash" else "ðŸŸ "
+
+    await query.edit_message_text(
+        f"{icon} *{method} â€” {amount:.2f} taka*\n\nðŸ“± Your *{method} number:*\nExample: `01712345678`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")]])
+    )
+
+async def cb_withdraw_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    sess["state"] = None
+    sess["data"]  = None
+    await query.edit_message_text("âŒ *Cancelled.*", parse_mode="Markdown")
+
+async def cb_withdraw_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid   = str(update.effective_user.id)
+    uwith = [w for w in withdrawals if w["userId"] == uid][-10:][::-1]
+
+    text = "ðŸ“‹ *Withdraw History*\n\n"
+    if not uwith:
+        text += "No withdrawal requests yet."
+    else:
+        for w in uwith:
+            icon = "âœ…" if w["status"] == "approved" else "âŒ" if w["status"] == "rejected" else "â³"
+            date = w["requestedAt"][:10]
+            text += f"{icon} *{w['amount']:.2f} taka* - {w['method']}\n"
+            text += f"ðŸ“± `{w['account']}` | {date}\n\n"
+
+    await query.edit_message_text(text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="goto_main")]]))
+
+async def cb_start_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid  = str(update.effective_user.id)
+    e    = get_user_earnings(uid)
+    sess = get_session(uid)
+    sess["state"] = None
+    sess["data"]  = None
+
+    if not settings.get("withdrawEnabled", True):
+        return await query.edit_message_text("â¸ï¸ *Withdrawals are currently disabled.*", parse_mode="Markdown")
+    if e["balance"] < settings["minWithdraw"]:
+        return await query.edit_message_text(
+            f"âŒ *Insufficient balance.*\nðŸ’µ Balance: {e['balance']:.2f} taka\nðŸ“Œ Minimum: {settings['minWithdraw']} taka",
+            parse_mode="Markdown"
+        )
+
+    await query.edit_message_text(
+        f"ðŸ’¸ *Withdraw*\n\nðŸ’µ Balance: *{e['balance']:.2f} taka*\n\nChoose method:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸŸ£ bKash", callback_data="wm:bKash"),
+             InlineKeyboardButton("ðŸŸ  Nagad", callback_data="wm:Nagad")],
+            [InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")],
+        ])
+    )
+
+# â”€â”€â”€ WhatsApp Connect â”€â”€â”€
+async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid  = str(update.effective_user.id)
+
+    # à¦¯à¦¦à¦¿ à¦‡à¦¤à¦¿à¦®à¦§à§à¦¯à§‡ connected à¦¥à¦¾à¦•à§‡
+    if wa_sessions.get(uid, {}).get("connected"):
+        await query.edit_message_text(
+            "âœ… *WhatsApp Already Connected!*\n\n"
+            "ðŸŸ¢ WhatsApp à¦à¦–à¦¨ active à¦†à¦›à§‡à¥¤\n"
+            "Disconnect à¦•à¦°à¦¤à§‡ à¦¨à¦¿à¦šà§‡à¦° à¦¬à¦¾à¦Ÿà¦¨ à¦šà¦¾à¦ªà§‹:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ðŸ”´ Logout / Disconnect", callback_data="wa_disconnect")],
+                [InlineKeyboardButton("ðŸ“Š Check Status", callback_data="wa_status")],
+            ])
+        )
+        return
+
+    sess = get_session(uid)
+    sess["state"] = "wa_waiting_number"
+    await context.bot.send_message(
+        update.effective_user.id,
+        "ðŸ“± WhatsApp Connect\n\nà¦¤à§‹à¦®à¦¾à¦° WhatsApp à¦¨à¦®à§à¦¬à¦° à¦¦à¦¾à¦“ (country code à¦¸à¦¹):\nExample: 8801712345678"
+    )
+
+async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("â³ Checking...")
+    uid   = str(update.effective_user.id)
+
+    try:
+        state = await green_get_state(uid)
+    except:
+        state = "notAuthorized"
+
+    conn = (state == "authorized")
+    if conn:
+        wa_sessions[uid] = {"connected": True}
+    else:
+        wa_sessions.pop(uid, None)
+
+    STATE_MAP = {
+        "authorized":    "âœ… *WhatsApp Connected!*\n\nNumber assign à¦¹à¦²à§‡ ðŸ“±/âŒ à¦¦à§‡à¦–à¦¾à¦¬à§‡à¥¤",
+        "notAuthorized": "ðŸ”´ *WhatsApp connected à¦¨à§‡à¦‡à¥¤*\n\nCode enter à¦•à¦°à¦²à§‡ à¦†à¦¬à¦¾à¦° Check Status à¦šà¦¾à¦ªà§‹à¥¤",
+    }
+    text = STATE_MAP.get(state, f"â“ Unknown state: {state}")
+    btns = [[InlineKeyboardButton("ðŸ”´ Disconnect", callback_data="wa_disconnect")]] if conn else \
+           [[InlineKeyboardButton("ðŸ“± Connect", callback_data="wa_connect")]]
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+
+async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("â³ Disconnecting...")
+    uid = str(update.effective_user.id)
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: baileys_request("POST", "/disconnect", {"userId": uid}))
+        logger.info(f"âœ… Baileys logout called for uid={uid}")
+    except Exception as e:
+        logger.error(f"Baileys logout error: {e}")
+
+    wa_sessions.pop(uid, None)
+
+    await query.edit_message_text(
+        "ðŸ”´ *WhatsApp Disconnected!*\n\n"
+        "à¦¤à§‹à¦®à¦¾à¦° WhatsApp à¦¸à¦«à¦²à¦­à¦¾à¦¬à§‡ logout à¦¹à¦¯à¦¼à§‡à¦›à§‡à¥¤\n"
+        "à¦†à¦¬à¦¾à¦° connect à¦•à¦°à¦¤à§‡ à¦¨à¦¿à¦šà§‡à¦° à¦¬à¦¾à¦Ÿà¦¨ à¦šà¦¾à¦ªà§‹:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“± Connect WhatsApp", callback_data="wa_connect")],
+        ])
+    )
+
+# â”€â”€â”€ Temp Mail â”€â”€â”€
+async def handle_tempmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_verified(update, context): return
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    sess["state"] = None
+    existing = temp_mails.get(uid)
+
+    if existing:
+        await update.message.reply_text(
+            f"ðŸ“§ *Temporary Email*\n\nðŸ“Œ Your email:\n`{existing['address']}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ðŸ“¬ Check Inbox", callback_data="tm_inbox")],
+                [InlineKeyboardButton("ðŸ“‹ Show Email", callback_data="tm_show")],
+                [InlineKeyboardButton("ðŸ”„ Get New Email", callback_data="tm_create")],
+                [InlineKeyboardButton("ðŸ—‘ï¸ Delete Email", callback_data="tm_delete")],
+            ])
+        )
+    else:
+        await update.message.reply_text(
+            "ðŸ“§ *Temporary Email*\n\nâœ… Create a new disposable email address.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ†• Create New Email", callback_data="tm_create")]])
+        )
+
+async def cb_tm_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("â³ Creating...")
+    uid   = str(update.effective_user.id)
+    loading = await context.bot.send_message(uid, "â³ *Creating your email...*", parse_mode="Markdown")
+
+    new_email = await create_fresh_email()
+    if not new_email:
+        await context.bot.edit_message_text(
+            "âŒ *Email creation failed.* Please try again.",
+            chat_id=uid, message_id=loading.message_id,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”„ Retry", callback_data="tm_create")]])
+        )
+        return
+
+    temp_mails[uid] = new_email
+    save_temp_mails()
+
+    await context.bot.edit_message_text(
+        f"âœ… *New Email Created!*\n\nðŸ“§ `{new_email['address']}`\n\nðŸ“Œ Use this on any website.",
+        chat_id=uid, message_id=loading.message_id,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“¬ Check Inbox", callback_data="tm_inbox")],
+            [InlineKeyboardButton("ðŸ”„ Get New Email", callback_data="tm_create")],
+            [InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data="tm_delete")],
+        ])
+    )
+
+async def cb_tm_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("ðŸ“¬ Loading...")
+    uid = str(update.effective_user.id)
+
+    if uid not in temp_mails:
+        return await query.edit_message_text(
+            "âŒ No email found.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ†• Create", callback_data="tm_create")]])
+        )
+
+    email_obj = temp_mails[uid]
+    messages  = await get_email_inbox(email_obj)
+    now_str   = datetime.now().strftime("%I:%M:%S %p")
+    text      = f"ðŸ“¬ *Inbox:* `{email_obj['address']}`\nðŸ• _{now_str}_\n\n"
+
+    if not messages:
+        text += "ðŸ“­ *No emails yet.*"
+    else:
+        for msg in messages[:5]:
+            text += f"â”â”â”â”â”â”â”â”â”â”\nðŸ“© *From:* {msg['from']}\nðŸ“Œ *Subject:* {msg['subject']}\n"
+            body = await get_email_message(msg["id"], email_obj)
+            if body:
+                otp_m = re.findall(r"\b\d{4,8}\b", body)
+                if otp_m:
+                    text += f"\nðŸ”‘ *OTP:* `{otp_m[0]}`\n"
+                text += f"\nðŸ“ _{body[:250]}..._\n" if len(body) > 250 else f"\nðŸ“ _{body}_\n"
+            text += "\n"
+
+    try:
+        await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ”„ Refresh", callback_data="tm_inbox")],
+            [InlineKeyboardButton("ðŸ”„ New Email", callback_data="tm_create")],
+            [InlineKeyboardButton("ðŸ—‘ï¸ Delete", callback_data="tm_delete")],
+        ]))
+    except:
+        pass
+
+async def cb_tm_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    if uid not in temp_mails:
+        return await query.answer("âŒ No email found", show_alert=True)
+    addr = temp_mails[uid]["address"]
+    await query.edit_message_text(
+        f"ðŸ“§ *Your Temp Email:*\n\n`{addr}`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“¬ Check Inbox", callback_data="tm_inbox")],
+            [InlineKeyboardButton("ðŸ”„ New Email", callback_data="tm_create")],
+        ])
+    )
+
+async def cb_tm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    temp_mails.pop(uid, None)
+    save_temp_mails()
+    await query.edit_message_text("âœ… *Email deleted.*", parse_mode="Markdown")
+
+# â”€â”€â”€ 2FA/TOTP â”€â”€â”€
+async def handle_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_verified(update, context): return
+    sess = get_session(str(update.effective_user.id))
+    sess["state"] = None
+    await update.message.reply_text(
+        "ðŸ” *2-Step Verification Code Generator*\n\nSelect a service:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“˜ Facebook 2FA", callback_data="totp:facebook")],
+            [InlineKeyboardButton("ðŸ“¸ Instagram 2FA", callback_data="totp:instagram")],
+            [InlineKeyboardButton("ðŸ” Google 2FA", callback_data="totp:google")],
+            [InlineKeyboardButton("âš™ï¸ Other 2FA", callback_data="totp:other")],
+        ])
+    )
+
+async def cb_totp_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    svc  = query.data.split(":", 1)[1]
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    sess["state"] = "totp_waiting_secret"
+    sess["data"]  = {"service": svc}
+
+    icons = {"facebook": "ðŸ“˜", "instagram": "ðŸ“¸", "google": "ðŸ”", "other": "âš™ï¸"}
+    names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "Other"}
+    icon  = icons.get(svc, "ðŸ”")
+    name  = names.get(svc, svc)
+
+    await query.edit_message_text(
+        f"{icon} *{name} Secret Key*\n\n"
+        f"Send your Authenticator Secret Key.\n\n"
+        f"ðŸ”‘ It looks like: `JBSWY3DPEHPK3PXP`\n\n"
+        f"Type /cancel to cancel",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="totp_back")]])
+    )
+
+async def cb_totp_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "ðŸ” *2FA Code Generator*\n\nSelect a service:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“˜ Facebook 2FA", callback_data="totp:facebook")],
+            [InlineKeyboardButton("ðŸ“¸ Instagram 2FA", callback_data="totp:instagram")],
+            [InlineKeyboardButton("ðŸ” Google 2FA", callback_data="totp:google")],
+            [InlineKeyboardButton("âš™ï¸ Other 2FA", callback_data="totp:other")],
+        ])
+    )
+
+async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("ðŸ”„ Refreshing...")
+    _, svc, secret_enc = query.data.split(":", 2)
+    secret = urllib.parse.unquote(secret_enc)
+    result = generate_totp(secret)
+
+    icons = {"facebook": "ðŸ“˜", "instagram": "ðŸ“¸", "google": "ðŸ”", "other": "âš™ï¸"}
+    names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "2FA"}
+    icon  = icons.get(svc, "ðŸ”")
+    name  = names.get(svc, svc)
+
+    if not result:
+        return await query.edit_message_text("âŒ Invalid secret key.", parse_mode="Markdown")
+
+    try:
+        await query.edit_message_text(
+            f"{icon} *{name} 2FA Code*\n\n"
+            f"ðŸ”‘ *Code:* `{result['token']}`\n\n"
+            f"â° *{result['timeRemaining']} seconds remaining*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ðŸ”„ Refresh Code", callback_data=f"totp_r:{svc}:{urllib.parse.quote(secret)}")],
+                [InlineKeyboardButton("ðŸ”™ Back", callback_data="totp_back")],
+            ])
+        )
+    except:
+        pass
+
+# â”€â”€â”€ Support & Help â”€â”€â”€
+async def handle_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ðŸ’¬ *Support*\n\nContact admin:\nðŸ“Œ @sadhin8miya",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ’¬ Contact", url="https://t.me/sadhin8miya")]])
+    )
+
+async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ðŸ“– *Bot Help*\n\n"
+        "â€¢ â˜Žï¸ *Get Number* - Virtual number à¦ªà¦¾à¦“\n"
+        "â€¢ ðŸ“§ *Get Tempmail* - Temp email à¦ªà¦¾à¦“\n"
+        "â€¢ ðŸ” *2FA* - 2-step verification code\n"
+        "â€¢ ðŸ’° *Balances* - à¦¤à§‹à¦®à¦¾à¦° earnings à¦¦à§‡à¦–à§‹\n"
+        "â€¢ ðŸ’¸ *Withdraw* - Balance withdraw à¦•à¦°à§‹\n\n"
+        f"ðŸ“Œ Minimum withdraw: {settings['minWithdraw']} taka\n\n"
+        "Admin: /adminlogin",
+        parse_mode="Markdown"
+    )
+
+# â”€â”€â”€ Admin Callbacks â”€â”€â”€
+async def cb_admin_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    report = "ðŸ“Š *Stock Report*\n\n"
+    total_all = 0
+    for cc, svcs in numbers_by_cs.items():
+        country = countries.get(cc, {"flag": "ðŸ´", "name": cc})
+        report += f"\n{country['flag']} {country['name']} (+{cc}):\n"
+        ct = 0
+        for svc_id, nums in svcs.items():
+            svc = services.get(svc_id, {"icon": "ðŸ“ž", "name": svc_id})
+            if nums:
+                report += f"  {svc['icon']} {svc['name']}: *{len(nums)}*\n"
+                ct += len(nums)
+        report += f"  *Total:* {ct}\n"
+        total_all += ct
+
+    report += f"\nðŸ“ˆ *Grand Total:* {total_all}\n"
+    report += f"ðŸ‘¥ *Active:* {len(active_numbers)}\n"
+    report += f"ðŸ“¨ *OTPs:* {len(otp_log)}"
+
+    if len(report) > 4000:
+        report = report[:3950] + "\n..._truncated_"
+
+    await query.edit_message_text(report, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("ðŸ”„ Refresh", callback_data="admin_stock")],
+        [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+    ]))
+
+async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    total = len(users)
+    msg   = f"ðŸ‘¥ *User Statistics*\n\nâ€¢ Total: {total}\nâ€¢ Active: {len(active_numbers)}\nâ€¢ OTPs: {len(otp_log)}\n\n"
+
+    recent = sorted(users.values(), key=lambda u: u.get("last_active",""), reverse=True)[:10]
+    for u in recent:
+        msg += f"ðŸ‘¤ *{u.get('first_name','')}*\nðŸ†” `{u['id']}` | @{u.get('username','')}\n"
+        msg += f"ðŸ• {get_time_ago(u.get('last_active', ''))}\n\n"
+
+    if len(msg) > 4000:
+        msg = msg[:3950] + "..._truncated_"
+
+    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("ðŸ”„ Refresh", callback_data="admin_users")],
+        [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+    ]))
+
+async def cb_admin_otp_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    msg = "ðŸ“‹ *Recent OTP Logs*\n\n"
+    if not otp_log:
+        msg += "No OTPs yet."
+    else:
+        for log in otp_log[-10:][::-1]:
+            msg += f"ðŸ“ž `{log['phoneNumber']}` â†’ ðŸ‘¤ `{log['userId']}`\n"
+            msg += f"ðŸ• {get_time_ago(log.get('timestamp',''))}\n\n"
+
+    await query.edit_message_text(msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("ðŸ”„ Refresh", callback_data="admin_otp_log")],
+        [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+    ]))
+
+async def cb_admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    sess = get_session(uid)
+    sess["state"] = "admin_broadcast"
+    await query.edit_message_text(
+        "ðŸ“¢ *Broadcast Message*\n\nSend the message to broadcast to all users:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    await query.edit_message_text(
+        f"âš™ï¸ *Bot Settings*\n\n"
+        f"ðŸ“ž Number Count: *{settings['defaultNumberCount']}*\n"
+        f"â± Cooldown: *{settings['cooldownSeconds']} seconds*\n"
+        f"ðŸ” Verification: *{'Enabled âœ…' if settings['requireVerification'] else 'Disabled âŒ'}*\n"
+        f"ðŸ’µ OTP Price: *{settings.get('defaultOtpPrice', 0.25):.2f} taka*\n"
+        f"ðŸ’¸ Min Withdraw: *{settings['minWithdraw']} taka*\n"
+        f"ðŸ§ Withdraw: *{'Enabled âœ…' if settings['withdrawEnabled'] else 'Disabled âŒ'}*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“ž Number Count", callback_data="as_count"),
+             InlineKeyboardButton("â± Cooldown", callback_data="as_cooldown")],
+            [InlineKeyboardButton(f"ðŸ” Verification {'Disable' if settings['requireVerification'] else 'Enable'}", callback_data="as_toggle_verify")],
+            [InlineKeyboardButton("ðŸ’µ OTP Price", callback_data="as_price"),
+             InlineKeyboardButton("ðŸ’¸ Min Withdraw", callback_data="as_minw")],
+            [InlineKeyboardButton(f"ðŸ§ Withdraw {'ðŸ”´ Disable' if settings['withdrawEnabled'] else 'ðŸŸ¢ Enable'}", callback_data="as_toggle_withdraw")],
+            [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+        ])
+    )
+
+async def cb_admin_toggle_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    settings["requireVerification"] = not settings["requireVerification"]
+    save_settings()
+    await query.answer(f"âœ… Verification {'Enabled' if settings['requireVerification'] else 'Disabled'}")
+    await cb_admin_settings(update, context)
+
+async def cb_admin_toggle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    settings["withdrawEnabled"] = not settings["withdrawEnabled"]
+    save_settings()
+    await query.answer(f"âœ… Withdraw {'Enabled' if settings['withdrawEnabled'] else 'Disabled'}")
+    await cb_admin_settings(update, context)
+
+async def cb_as_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_set_count"
+    await query.edit_message_text(
+        f"ðŸ“ž *Set Number Count*\n\nCurrent: *{settings['defaultNumberCount']}*\n\nSend new count (1-100):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_as_cooldown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_set_cooldown"
+    await query.edit_message_text(
+        f"â± *Set Cooldown*\n\nCurrent: *{settings['cooldownSeconds']} seconds*\n\nSend new cooldown (1-3600):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_as_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_set_price"
+    await query.edit_message_text(
+        f"ðŸ’µ *Set Default OTP Price*\n\nCurrent: *{settings.get('defaultOtpPrice', 0.25):.2f} taka*\n\nSend new price:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_as_minw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_set_minw"
+    await query.edit_message_text(
+        f"ðŸ’¸ *Set Min Withdraw*\n\nCurrent: *{settings['minWithdraw']} taka*\n\nSend new minimum:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_add_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_add_numbers"
+    await query.edit_message_text(
+        "âž• *Add Numbers*\n\nFormat:\n`[number]|[country code]|[service]`\n\nExample:\n`8801712345678|880|whatsapp`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    pending = [w for w in withdrawals if w["status"] == "pending"]
+    msg = f"ðŸ’¸ *Pending Withdrawals:* {len(pending)}\n\n"
+
+    for w in pending[:10]:
+        msg += f"ðŸ†” `{w['id'][-8:]}`\n"
+        msg += f"ðŸ‘¤ {w.get('userName','')} | ðŸ’µ {w['amount']:.2f} taka\n"
+        msg += f"ðŸ“± {w['method']}: `{w['account']}`\n\n"
+
+    buttons = []
+    for w in pending[:5]:
+        buttons.append([
+            InlineKeyboardButton(f"âœ… {w['id'][-6:]}", callback_data=f"wadm_approve:{w['id']}"),
+            InlineKeyboardButton(f"âŒ {w['id'][-6:]}", callback_data=f"wadm_reject:{w['id']}"),
+        ])
+    buttons.append([InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")])
+
+    await query.edit_message_text(msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_withdraw_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    wid = query.data.split(":", 1)[1]
+    for w in withdrawals:
+        if w["id"] == wid:
+            w["status"] = "approved"
+            w["processedAt"] = datetime.now().isoformat()
+            save_withdrawals()
+            await query.answer("âœ… Approved!")
+            try:
+                await context.bot.send_message(w["userId"],
+                    f"âœ… *Withdrawal Approved!*\n\nðŸ’µ {w['amount']:.2f} taka â†’ {w['method']}: `{w['account']}`",
+                    parse_mode="Markdown")
+            except:
+                pass
+            break
+    await cb_admin_withdrawals(update, context)
+
+async def cb_withdraw_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    wid = query.data.split(":", 1)[1]
+    for w in withdrawals:
+        if w["id"] == wid:
+            w["status"] = "rejected"
+            w["processedAt"] = datetime.now().isoformat()
+            # Refund
+            e = get_user_earnings(w["userId"])
+            e["balance"] = round(e["balance"] + w["amount"], 2)
+            save_earnings()
+            save_withdrawals()
+            await query.answer("âŒ Rejected!")
+            try:
+                await context.bot.send_message(w["userId"],
+                    f"âŒ *Withdrawal Rejected.*\n\nðŸ’µ {w['amount']:.2f} taka refunded.",
+                    parse_mode="Markdown")
+            except:
+                pass
+            break
+    await cb_admin_withdrawals(update, context)
+
+async def cb_admin_balance_manage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    await query.edit_message_text(
+        "ðŸ‘› *Balance Management*\n\nSelect action:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("âž• Add Balance", callback_data="bal_add"),
+             InlineKeyboardButton("âž– Deduct Balance", callback_data="bal_deduct")],
+            [InlineKeyboardButton("ðŸ”„ Reset Balance", callback_data="bal_reset")],
+            [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+        ])
+    )
+
+async def cb_bal_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_add_balance"
+    await query.edit_message_text(
+        "âž• *Add Balance*\n\nFormat: `[userId] [amount]`\nExample: `123456789 50`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_bal_deduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_deduct_balance"
+    await query.edit_message_text(
+        "âž– *Deduct Balance*\n\nFormat: `[userId] [amount]`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_bal_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_reset_balance"
+    await query.edit_message_text(
+        "ðŸ”„ *Reset Balance*\n\nSend the userId:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_country_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    get_session(uid)["state"] = "admin_set_country_price"
+    text = "ðŸ’° *Country Prices*\n\nCurrent prices:\n"
+    for cc, c in countries.items():
+        p = country_prices.get(cc, settings.get("defaultOtpPrice", 0.25))
+        text += f"{c['flag']} +{cc}: *{p:.2f} TK*\n"
+    text += "\nSend new prices (format: `880 0.50`):"
+
+    await query.edit_message_text(text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]]))
+
+async def cb_admin_manage_countries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    await query.edit_message_text(
+        f"ðŸŒ *Manage Countries*\n\nTotal: *{len(countries)}*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("âž• Add Country", callback_data="country_add"),
+             InlineKeyboardButton("ðŸ“‹ List Countries", callback_data="country_list")],
+            [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+        ])
+    )
+
+async def cb_country_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = "ðŸŒ *Country List*\n\n"
+    for cc, c in countries.items():
+        p = country_prices.get(cc, settings.get("defaultOtpPrice", 0.25))
+        text += f"{c['flag']} *{c['name']}* (+{cc}) â€” {p:.2f} TK/OTP\n"
+    await query.edit_message_text(text[:4000], parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_manage_countries")]]))
+
+async def cb_country_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = "admin_add_country"
+    await query.edit_message_text(
+        "ðŸŒ *Add Country*\n\nFormat: `[code] [name] [flag]`\nExample: `880 Bangladesh ðŸ‡§ðŸ‡©`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_manage_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    await query.edit_message_text(
+        "ðŸ”§ *Manage Services*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("ðŸ“‹ List Services", callback_data="svc_list"),
+             InlineKeyboardButton("âž• Add Service", callback_data="svc_add")],
+            [InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")],
+        ])
+    )
+
+async def cb_svc_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = "ðŸ“‹ *Services List*\n\n"
+    for svc_id, svc in services.items():
+        text += f"â€¢ {svc['icon']} *{svc['name']}* (ID: `{svc_id}`)\n"
+    await query.edit_message_text(text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_manage_services")]]))
+
+async def cb_svc_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = "admin_add_service"
+    await query.edit_message_text(
+        "ðŸ”§ *Add Service*\n\nFormat: `[id] [name] [icon]`\nExample: `facebook Facebook ðŸ“˜`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    sess = get_session(uid)
+    sess["state"] = "admin_upload_select_service"
+
+    buttons = [[InlineKeyboardButton(f"{svc['icon']} {svc['name']}", callback_data=f"upload_svc:{svc_id}")]
+               for svc_id, svc in services.items()]
+    buttons.append([InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")])
+    await query.edit_message_text("ðŸ“¤ *Upload Numbers*\n\nSelect service:", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_upload_svc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    svc_id = query.data.split(":", 1)[1]
+    svc    = services.get(svc_id, {"name": svc_id})
+    sess   = get_session(uid)
+    sess["state"] = "admin_upload_file"
+    sess["data"]  = {"serviceId": svc_id}
+    await query.edit_message_text(
+        f"ðŸ“¤ *Upload Numbers for {svc['name']}*\n\nSend a .txt file with numbers (one per line).",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="admin_cancel")]])
+    )
+
+async def cb_admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = None
+    get_session(uid)["data"]  = None
+    await query.edit_message_text("ðŸ›  *Admin Dashboard*\n\nSelect an option:", parse_mode="Markdown", reply_markup=admin_keyboard())
+
+async def cb_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    get_session(uid)["state"] = None
+    get_session(uid)["data"]  = None
+    await query.edit_message_text("âŒ *Cancelled.*", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ›  Back to Admin", callback_data="admin_back")]]))
+
+async def cb_admin_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    await query.answer()
+    sess = get_session(uid)
+    sess["is_admin"] = False
+    sess["state"]    = None
+    await query.edit_message_text("ðŸšª *Admin Logged Out.*", parse_mode="Markdown")
+
+async def cb_admin_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+
+    buttons = []
+    for cc, svcs in numbers_by_cs.items():
+        for svc_id, nums in svcs.items():
+            if nums:
+                svc = services.get(svc_id, {"icon": "ðŸ“ž"})
+                buttons.append([InlineKeyboardButton(
+                    f"ðŸ—‘ï¸ +{cc}/{svc_id} ({len(nums)})",
+                    callback_data=f"del_confirm:{cc}:{svc_id}"
+                )])
+    buttons.append([InlineKeyboardButton("âŒ Cancel", callback_data="admin_back")])
+    await query.edit_message_text("ðŸ—‘ï¸ *Delete Numbers*\n\nSelect to delete:", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons))
+
+async def cb_del_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    _, cc, svc_id = query.data.split(":")
+    count = len(numbers_by_cs.get(cc, {}).get(svc_id, []))
+    await query.edit_message_text(
+        f"âš ï¸ *Confirm Deletion*\n\nDelete {count} numbers from +{cc}/{svc_id}?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("âœ… Yes", callback_data=f"del_exec:{cc}:{svc_id}"),
+             InlineKeyboardButton("âŒ No", callback_data="admin_back")],
+        ])
+    )
+
+async def cb_del_exec(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = str(update.effective_user.id)
+    if not get_session(uid)["is_admin"] and not is_admin(uid):
+        return await query.answer("âŒ Admin only")
+    await query.answer()
+    _, cc, svc_id = query.data.split(":")
+    count = len(numbers_by_cs.get(cc, {}).get(svc_id, []))
+    if cc in numbers_by_cs and svc_id in numbers_by_cs[cc]:
+        del numbers_by_cs[cc][svc_id]
+        if not numbers_by_cs[cc]:
+            del numbers_by_cs[cc]
+    save_numbers()
+    await query.edit_message_text(f"âœ… *Deleted {count} numbers.*", parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="admin_back")]]))
+
+async def cb_goto_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("âœ… Done.", parse_mode="Markdown")
+
+# â”€â”€â”€ Document Handler (file upload) â”€â”€â”€
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+
+    if sess.get("state") != "admin_upload_file":
+        return
+
+    doc = update.message.document
+    if not doc.file_name.endswith(".txt"):
+        return await update.message.reply_text("âŒ Only .txt files are supported.")
+
+    file = await context.bot.get_file(doc.file_id)
+    content = await file.download_as_bytearray()
+    lines   = content.decode("utf-8", errors="ignore").split("\n")
+
+    svc_id = (sess.get("data") or {}).get("serviceId", "other")
+    added = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            parts = line.split("|")
+            num = parts[0].strip()
+            cc  = parts[1].strip() if len(parts) > 1 else get_country_code_from_number(num)
+            svc = parts[2].strip() if len(parts) > 2 else svc_id
+        else:
+            num = line
+            cc  = get_country_code_from_number(num)
+            svc = svc_id
+
+        if not re.match(r"^\d{10,15}$", num) or not cc:
+            continue
+        numbers_by_cs.setdefault(cc, {}).setdefault(svc, [])
+        if num not in numbers_by_cs[cc][svc]:
+            numbers_by_cs[cc][svc].append(num)
+            added += 1
+
+    save_numbers()
+    sess["state"] = None
+    sess["data"]  = None
+    await update.message.reply_text(f"âœ… *{added} numbers uploaded successfully!*", parse_mode="Markdown")
+
+# â”€â”€â”€ Main Text Handler â”€â”€â”€
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    user = update.effective_user
+    uid  = str(user.id)
+    text = update.message.text.strip()
+
+    # Update user record
+    if uid not in users:
+        users[uid] = {
+            "id": uid, "username": user.username or "no_username",
+            "first_name": user.first_name or "User", "last_name": user.last_name or "",
+            "joined": datetime.now().isoformat(), "last_active": datetime.now().isoformat(), "verified": False
+        }
+    users[uid]["last_active"] = datetime.now().isoformat()
+    save_users()
+
+    sess = get_session(uid)
+    # Restore admin status from file if session was cleared (e.g. after restart)
+    if not sess.get("is_admin") and is_admin(uid):
+        sess["is_admin"] = True
+    state = sess.get("state")
+
+    # â”€â”€ WhatsApp number input â”€â”€
+    if state == "wa_waiting_number":
+        sess["state"] = None
+        phone = re.sub(r"\D", "", text)
+        if len(phone) < 10 or len(phone) > 15:
+            return await update.message.reply_text("âŒ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
+
+        loading = await update.message.reply_text(
+            "â³ *Pairing code à¦¨à¦¿à¦šà§à¦›à§‡...*\n\n"
+            "âŒ› à¦•à¦¯à¦¼à§‡à¦• à¦¸à§‡à¦•à§‡à¦¨à§à¦¡ à¦…à¦ªà§‡à¦•à§à¦·à¦¾ à¦•à¦°à§‹à¥¤",
+            parse_mode="Markdown"
+        )
+
+        async def wa_task():
+            try:
+                code = await get_wa_pairing_code(phone, uid)
+                clean_code = re.sub(r"[^A-Z0-9]", "", code.upper())
+                formatted = (clean_code[:4] + "-" + clean_code[4:8]) if len(clean_code) >= 8 else code
+                try: await loading.delete()
+                except: pass
+                await context.bot.send_message(
+                    uid,
+                    f"ðŸ”‘ *Pairing Code*\n\n"
+                    f"`{formatted}`\n\n"
+                    f"ðŸ“‹ *Steps:*\n"
+                    f"1. WhatsApp à¦–à§‹à¦²à§‹\n"
+                    f"2. Settings â†’ Linked Devices\n"
+                    f"3. Link a Device â†’ *Link with phone number*\n"
+                    f"4. à¦‰à¦ªà¦°à§‡à¦° code enter à¦•à¦°à§‹\n\n"
+                    f"âœ… Code enter à¦•à¦°à¦¾à¦° à¦ªà¦° *Check Status* à¦šà¦¾à¦ªà§‹à¥¤",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("âœ… Check Status", callback_data="wa_status")],
+                        [InlineKeyboardButton("ðŸ”„ New Code", callback_data="wa_connect")],
+                    ])
+                )
+                asyncio.create_task(monitor_wa_connection(uid, context))
+            except Exception as e:
+                try: await loading.delete()
+                except: pass
+                logger.error(f"WA error: {e}", exc_info=True)
+                await context.bot.send_message(
+                    uid,
+                    f"âŒ *Connection failed:* {str(e)[:150]}\n\nà¦•à¦¿à¦›à§à¦•à§à¦·à¦£ à¦ªà¦° à¦†à¦¬à¦¾à¦° try à¦•à¦°à§‹à¥¤",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”„ Try Again", callback_data="wa_connect")]])
+                )
+
+        asyncio.create_task(wa_task())
+        return
+
+    # â”€â”€ TOTP secret input â”€â”€
+    if state == "totp_waiting_secret":
+        sess["state"] = None
+        svc    = (sess.get("data") or {}).get("service", "other")
+        result = generate_totp(text)
+        if not result:
+            return await update.message.reply_text("âŒ *Invalid secret key!* Please try again.", parse_mode="Markdown")
+
+        icons = {"facebook": "ðŸ“˜", "instagram": "ðŸ“¸", "google": "ðŸ”", "other": "âš™ï¸"}
+        names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "2FA"}
+        icon  = icons.get(svc, "ðŸ”")
+        name  = names.get(svc, svc)
+
+        await update.message.reply_text(
+            f"{icon} *{name} 2FA Code*\n\n"
+            f"ðŸ”‘ *Code:* `{result['token']}`\n\n"
+            f"â° *{result['timeRemaining']} seconds remaining*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ðŸ”„ Refresh Code", callback_data=f"totp_r:{svc}:{urllib.parse.quote(text)}")],
+                [InlineKeyboardButton("ðŸ”™ Back", callback_data="totp_back")],
+            ])
+        )
+        return
+
+    # â”€â”€ Withdraw account input â”€â”€
+    if state == "w_account":
+        sess["state"] = None
+        data   = sess.get("data", {})
+        method = data.get("method", "bKash")
+        amount = data.get("amount", 0)
+        uid_e  = uid
+        e      = get_user_earnings(uid_e)
+
+        if amount > e["balance"]:
+            return await update.message.reply_text("âŒ Insufficient balance!")
+
+        icon = "ðŸŸ£" if method == "bKash" else "ðŸŸ "
+        sess["state"] = "w_confirm"
+        sess["data"]  = {"method": method, "amount": amount, "account": text}
+
+        await update.message.reply_text(
+            f"{icon} *Confirm Withdrawal*\n\n"
+            f"ðŸ’³ Method: {method}\n"
+            f"ðŸ“± Account: `{text}`\n"
+            f"ðŸ’µ Amount: *{amount:.2f} taka*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("âœ… Confirm", callback_data="w_confirm"),
+                 InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")],
+            ])
+        )
+        return
+
+    # â”€â”€ Admin states â”€â”€
+    if state == "admin_broadcast" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        sent = 0
+        for target_uid in list(users.keys()):
+            try:
+                await context.bot.send_message(target_uid, text, parse_mode="Markdown")
+                sent += 1
+                await asyncio.sleep(0.05)
+            except:
+                pass
+        await update.message.reply_text(f"âœ… *Broadcast sent to {sent} users.*", parse_mode="Markdown")
+        return
+
+    if state == "admin_add_numbers" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        added = 0
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) >= 3:
+                num, cc, svc = parts[0].strip(), parts[1].strip(), parts[2].strip()
+            elif len(parts) == 2:
+                num, cc, svc = parts[0].strip(), parts[1].strip(), "other"
+            else:
+                num = line
+                cc  = get_country_code_from_number(num)
+                svc = "other"
+            if re.match(r"^\d{10,15}$", num) and cc:
+                numbers_by_cs.setdefault(cc, {}).setdefault(svc, [])
+                if num not in numbers_by_cs[cc][svc]:
+                    numbers_by_cs[cc][svc].append(num)
+                    added += 1
+        save_numbers()
+        await update.message.reply_text(f"âœ… *{added} numbers added!*", parse_mode="Markdown")
+        return
+
+    if state == "admin_set_count" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        try:
+            val = int(text)
+            if 1 <= val <= 100:
+                settings["defaultNumberCount"] = val
+                save_settings()
+                await update.message.reply_text(f"âœ… *Number count set to {val}.*", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("âŒ Enter 1-100.")
+        except:
+            await update.message.reply_text("âŒ Invalid number.")
+        return
+
+    if state == "admin_set_cooldown" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        try:
+            val = int(text)
+            if 1 <= val <= 3600:
+                settings["cooldownSeconds"] = val
+                save_settings()
+                await update.message.reply_text(f"âœ… *Cooldown set to {val} seconds.*", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("âŒ Enter 1-3600.")
+        except:
+            await update.message.reply_text("âŒ Invalid number.")
+        return
+
+    if state == "admin_set_price" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        try:
+            val = float(text)
+            if val >= 0:
+                settings["defaultOtpPrice"] = val
+                save_settings()
+                await update.message.reply_text(f"âœ… *Default OTP price set to {val:.2f} taka.*", parse_mode="Markdown")
+        except:
+            await update.message.reply_text("âŒ Invalid price.")
+        return
+
+    if state == "admin_set_minw" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        try:
+            val = float(text)
+            if val > 0:
+                settings["minWithdraw"] = val
+                save_settings()
+                await update.message.reply_text(f"âœ… *Min withdraw set to {val:.2f} taka.*", parse_mode="Markdown")
+        except:
+            await update.message.reply_text("âŒ Invalid amount.")
+        return
+
+    if state == "admin_add_balance" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        parts = text.split()
+        if len(parts) >= 2:
+            try:
+                target_id = parts[0]
+                amount    = float(parts[1])
+                e         = get_user_earnings(target_id)
+                e["balance"] = round(e["balance"] + amount, 2)
+                save_earnings()
+                await update.message.reply_text(f"âœ… *{amount:.2f} taka added to {target_id}.*", parse_mode="Markdown")
+            except:
+                await update.message.reply_text("âŒ Error.")
+        else:
+            await update.message.reply_text("âŒ Format: `[userId] [amount]`", parse_mode="Markdown")
+        return
+
+    if state == "admin_deduct_balance" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        parts = text.split()
+        if len(parts) >= 2:
+            try:
+                target_id = parts[0]
+                amount    = float(parts[1])
+                e         = get_user_earnings(target_id)
+                e["balance"] = max(0, round(e["balance"] - amount, 2))
+                save_earnings()
+                await update.message.reply_text(f"âœ… *{amount:.2f} taka deducted from {target_id}.*", parse_mode="Markdown")
+            except:
+                await update.message.reply_text("âŒ Error.")
+        return
+
+    if state == "admin_reset_balance" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        target_id = text.strip()
+        e = get_user_earnings(target_id)
+        e["balance"] = 0
+        save_earnings()
+        await update.message.reply_text(f"âœ… *{target_id}'s balance reset to 0.*", parse_mode="Markdown")
+        return
+
+    if state == "admin_set_country_price" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        updated = 0
+        for line in text.split("\n"):
+            parts = re.split(r"[:\s]+", line.strip())
+            if len(parts) >= 2:
+                cc    = re.sub(r"\D", "", parts[0])
+                try:
+                    price = float(parts[1])
+                    if cc and price >= 0:
+                        country_prices[cc] = price
+                        updated += 1
+                except:
+                    pass
+        save_cp()
+        await update.message.reply_text(f"âœ… *{updated} prices updated!*", parse_mode="Markdown")
+        return
+
+    if state == "admin_add_country" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        parts = text.split()
+        if len(parts) >= 3:
+            cc   = re.sub(r"\D", "", parts[0])
+            name = " ".join(parts[1:-1])
+            flag = parts[-1]
+            countries[cc] = {"name": name, "flag": flag}
+            save_countries()
+            await update.message.reply_text(f"âœ… *Country added!*\n+{cc}: {flag} {name}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("âŒ Format: `[code] [name] [flag]`", parse_mode="Markdown")
+        return
+
+    if state == "admin_add_service" and (sess["is_admin"] or is_admin(uid)):
+        sess["state"] = None
+        parts = text.split()
+        if len(parts) >= 3:
+            svc_id   = parts[0].lower()
+            svc_name = " ".join(parts[1:-1])
+            icon     = parts[-1]
+            services[svc_id] = {"name": svc_name, "icon": icon}
+            save_services()
+            await update.message.reply_text(f"âœ… *Service added!*\n`{svc_id}`: {icon} {svc_name}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("âŒ Format: `[id] [name] [icon]`", parse_mode="Markdown")
+        return
+
+    if state == "w_amount":
+        # Try to parse amount from typed text
+        try:
+            amount = float(text)
+            uid_e  = uid
+            e      = get_user_earnings(uid_e)
+            method = (sess.get("data") or {}).get("method", "bKash")
+
+            if amount < settings["minWithdraw"]:
+                return await update.message.reply_text(f"âŒ Minimum {settings['minWithdraw']} taka")
+            if amount > e["balance"]:
+                return await update.message.reply_text("âŒ Insufficient balance!")
+
+            sess["state"] = "w_account"
+            sess["data"]  = {"method": method, "amount": amount}
+            icon = "ðŸŸ£" if method == "bKash" else "ðŸŸ "
+            await update.message.reply_text(
+                f"{icon} *{method} â€” {amount:.2f} taka*\n\nðŸ“± Your {method} number:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("âŒ Cancel", callback_data="w_cancel")]])
+            )
+        except:
+            pass
+        return
+
+# â”€â”€â”€ Withdraw Confirm (callback) â”€â”€â”€
+async def cb_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    if sess.get("state") != "w_confirm":
+        return
+
+    data   = sess.get("data", {})
+    method  = data.get("method")
+    account = data.get("account")
+    amount  = data.get("amount")
+    e       = get_user_earnings(uid)
+
+    if amount > e["balance"]:
+        sess["state"] = None
+        return await query.edit_message_text("âŒ Balance changed. Please try again.", parse_mode="Markdown")
+
+    e["balance"] = round(e["balance"] - amount, 2)
+    save_earnings()
+
+    wid = str(int(time.time() * 1000))
+    withdrawals.append({
+        "id": wid, "userId": uid,
+        "userName": update.effective_user.first_name or "User",
+        "userUsername": update.effective_user.username or "",
+        "amount": amount, "method": method, "account": account,
+        "status": "pending", "requestedAt": datetime.now().isoformat(), "processedAt": None
+    })
+    save_withdrawals()
+    sess["state"] = None
+    sess["data"]  = None
+
+    await query.edit_message_text(
+        f"âœ… *Withdrawal Request Submitted!*\n\n"
+        f"ðŸ’³ {method}\nðŸ“± `{account}`\nðŸ’µ {amount:.2f} taka\n\n"
+        f"â³ Admin approval pending.",
+        parse_mode="Markdown"
+    )
+
+# â”€â”€â”€ OTP Group Message Handler â”€â”€â”€
+async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    chat_id = update.message.chat_id
+    if str(chat_id) != str(OTP_GROUP_ID) and chat_id != OTP_GROUP_ID:
+        return
+
+    msg_text = update.message.text or update.message.caption or ""
+    msg_id   = update.message.message_id
+    if not msg_text:
+        return
+
+    logger.info(f"ðŸ“¨ OTP Group [{msg_id}]: {msg_text[:80]}")
+    matched = find_matching_active_number(msg_text)
+    if not matched:
+        return
+
+    data = active_numbers[matched]
+    uid  = data["userId"]
+    cc   = data.get("countryCode", "")
+
+    if data.get("lastOTP") == msg_id:
+        return
+    data["lastOTP"] = msg_id
+    data["otpCount"] = data.get("otpCount", 0) + 1
+    save_active()
+
+    otp_code = extract_otp(msg_text)
+    earned   = add_earning(uid, cc)
+    balance  = get_user_earnings(uid)["balance"]
+    svc      = services.get(data.get("service",""), {"icon": "ðŸ“±", "name": "Service"})
+    country  = countries.get(cc, {"flag": "ðŸŒ", "name": cc})
+
+    notify = (
+        f"ðŸ“¨ *OTP Received!*\n\n"
+        f"{svc['icon']} *Service:* {svc['name']}\n"
+        f"{country['flag']} *Country:* {country['name']}\n"
+        f"ðŸ“ž *Number:* `+{matched}`\n"
+    )
+    if otp_code:
+        notify += f"\nðŸ”‘ *OTP Code:* `{otp_code}`\n"
+    notify += f"\nðŸ’µ *+{earned:.2f} taka earned!*\nðŸ’° *Balance: {balance:.2f} taka*"
+
+    try:
+        await context.bot.send_message(uid, notify, parse_mode="Markdown")
+        await context.bot.forward_message(uid, OTP_GROUP_ID, msg_id)
+    except Exception as e:
+        logger.error(f"OTP notify error: {e}")
+
+    otp_log.append({
+        "phoneNumber": matched, "userId": uid, "countryCode": cc,
+        "service": data.get("service"), "otpCode": otp_code, "earned": earned,
+        "messageId": msg_id, "delivered": True,
+        "timestamp": datetime.now().isoformat()
+    })
+    save_otp_log()
+
+# â”€â”€â”€ /cancel command â”€â”€â”€
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    sess["state"] = None
+    sess["data"]  = None
+    if is_admin(uid):
+        sess["is_admin"] = True
+    await update.message.reply_text("âœ… Cancelled.", reply_markup=main_keyboard())
+
+# â”€â”€â”€ Periodic scheduled check â”€â”€â”€
+async def scheduled_membership_check(app):
+    while True:
+        await asyncio.sleep(2 * 3600)
+        if not settings.get("requireVerification", True):
+            continue
+        logger.info(f"ðŸ”„ [Scheduled] Checking {len(users)} users...")
+        blocked = 0
+        for uid, user in list(users.items()):
+            try:
+                membership = await check_membership(int(uid), app)
+                if not membership["allJoined"]:
+                    users[uid]["verified"] = False
+                    blocked += 1
+                    sess = get_session(uid)
+                    sess["verified"] = False
+                    try:
+                        await app.bot.send_message(int(uid),
+                            "â›” *Access Blocked!*\n\nYou left a required group.",
+                            parse_mode="Markdown", reply_markup=verify_keyboard())
+                    except:
+                        pass
+                else:
+                    users[uid]["verified"] = True
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"Scheduled check error for {uid}: {e}")
+        save_users()
+        logger.info(f"âœ… [Scheduled] {blocked} users blocked.")
+
+# â”€â”€â”€ Main â”€â”€â”€
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Commands
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("adminlogin", cmd_adminlogin))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+
+    # Reply keyboard handlers
+    app.add_handler(MessageHandler(filters.Regex("^(â˜Žï¸ Get Number|ðŸ“ž Get Numbers)$"), handle_get_numbers))
+    app.add_handler(MessageHandler(filters.Regex("^ðŸ“§"), handle_tempmail))
+    app.add_handler(MessageHandler(filters.Regex("^ðŸ”"), handle_2fa))
+    app.add_handler(MessageHandler(filters.Regex("^ðŸ’° Balances$"), handle_balance))
+    app.add_handler(MessageHandler(filters.Regex("^ðŸ’¸ Withdraw$"), handle_withdraw))
+    app.add_handler(MessageHandler(filters.Regex("^ðŸ’¬ Support$"), handle_support))
+    app.add_handler(MessageHandler(filters.Regex("^â„¹ï¸ Help$"), handle_help))
+
+    # Document handler
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, handle_document))
+
+    # Callback handlers
+    app.add_handler(CallbackQueryHandler(cb_verify, pattern="^verify_user$"))
+    app.add_handler(CallbackQueryHandler(cb_select_service, pattern="^svc:"))
+    app.add_handler(CallbackQueryHandler(cb_select_country, pattern="^cc:"))
+    app.add_handler(CallbackQueryHandler(cb_new_numbers, pattern="^newnum:"))
+    app.add_handler(CallbackQueryHandler(cb_back_services, pattern="^back_services$"))
+
+    app.add_handler(CallbackQueryHandler(cb_start_withdraw, pattern="^start_withdraw$"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_method, pattern="^wm:"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_amount, pattern="^wa:"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_cancel, pattern="^w_cancel$"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_confirm, pattern="^w_confirm$"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_history, pattern="^withdraw_history$"))
+    app.add_handler(CallbackQueryHandler(cb_goto_main, pattern="^goto_main$"))
+
+    app.add_handler(CallbackQueryHandler(cb_wa_connect, pattern="^wa_connect$"))
+    app.add_handler(CallbackQueryHandler(cb_wa_status, pattern="^wa_status$"))
+    app.add_handler(CallbackQueryHandler(cb_wa_disconnect, pattern="^wa_disconnect$"))
+
+    app.add_handler(CallbackQueryHandler(cb_tm_create, pattern="^tm_create$"))
+    app.add_handler(CallbackQueryHandler(cb_tm_inbox, pattern="^tm_inbox$"))
+    app.add_handler(CallbackQueryHandler(cb_tm_show, pattern="^tm_show$"))
+    app.add_handler(CallbackQueryHandler(cb_tm_delete, pattern="^tm_delete$"))
+
+    app.add_handler(CallbackQueryHandler(cb_totp_service, pattern="^totp:"))
+    app.add_handler(CallbackQueryHandler(cb_totp_back, pattern="^totp_back$"))
+    app.add_handler(CallbackQueryHandler(cb_totp_refresh, pattern="^totp_r:"))
+
+    # Admin callbacks
+    app.add_handler(CallbackQueryHandler(cb_admin_stock, pattern="^admin_stock$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_users, pattern="^admin_users$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_otp_log, pattern="^admin_otp_log$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_broadcast, pattern="^admin_broadcast$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_settings, pattern="^admin_settings$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_toggle_verify, pattern="^as_toggle_verify$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_toggle_withdraw, pattern="^as_toggle_withdraw$"))
+    app.add_handler(CallbackQueryHandler(cb_as_count, pattern="^as_count$"))
+    app.add_handler(CallbackQueryHandler(cb_as_cooldown, pattern="^as_cooldown$"))
+    app.add_handler(CallbackQueryHandler(cb_as_price, pattern="^as_price$"))
+    app.add_handler(CallbackQueryHandler(cb_as_minw, pattern="^as_minw$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_add_numbers, pattern="^admin_add_numbers$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_withdrawals, pattern="^admin_withdrawals$"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_approve, pattern="^wadm_approve:"))
+    app.add_handler(CallbackQueryHandler(cb_withdraw_reject, pattern="^wadm_reject:"))
+    app.add_handler(CallbackQueryHandler(cb_admin_balance_manage, pattern="^admin_balance_manage$"))
+    app.add_handler(CallbackQueryHandler(cb_bal_add, pattern="^bal_add$"))
+    app.add_handler(CallbackQueryHandler(cb_bal_deduct, pattern="^bal_deduct$"))
+    app.add_handler(CallbackQueryHandler(cb_bal_reset, pattern="^bal_reset$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_country_prices, pattern="^admin_country_prices$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_manage_countries, pattern="^admin_manage_countries$"))
+    app.add_handler(CallbackQueryHandler(cb_country_list, pattern="^country_list$"))
+    app.add_handler(CallbackQueryHandler(cb_country_add, pattern="^country_add$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_manage_services, pattern="^admin_manage_services$"))
+    app.add_handler(CallbackQueryHandler(cb_svc_list, pattern="^svc_list$"))
+    app.add_handler(CallbackQueryHandler(cb_svc_add, pattern="^svc_add$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_upload, pattern="^admin_upload$"))
+    app.add_handler(CallbackQueryHandler(cb_upload_svc, pattern="^upload_svc:"))
+    app.add_handler(CallbackQueryHandler(cb_admin_delete, pattern="^admin_delete$"))
+    app.add_handler(CallbackQueryHandler(cb_del_confirm, pattern="^del_confirm:"))
+    app.add_handler(CallbackQueryHandler(cb_del_exec, pattern="^del_exec:"))
+    app.add_handler(CallbackQueryHandler(cb_admin_back, pattern="^admin_back$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_cancel, pattern="^admin_cancel$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_logout, pattern="^admin_logout$"))
+
+    # OTP group handler â€” only matches messages from the OTP group chat
+    app.add_handler(MessageHandler(filters.Chat(OTP_GROUP_ID) & ~filters.COMMAND, handle_otp_group_message))
+    # Private text handler
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
+
+    # Start scheduled tasks
+    async def post_init(application):
+        asyncio.create_task(scheduled_membership_check(application))
+        asyncio.create_task(green_api_monitor(application))
+
+    app.post_init = post_init
+
+    logger.info("="*50)
+    logger.info("ðŸš€ Starting Earning Hub Bot (Python)...")
+    logger.info(f"ðŸ“¢ Main Channel: {MAIN_CHANNEL_ID}")
+    logger.info(f"ðŸ’¬ Chat Group: {CHAT_GROUP_ID}")
+    logger.info(f"ðŸ“¨ OTP Group: {OTP_GROUP_ID}")
+    logger.info("="*50)
+
+    app.run_polling(allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
+
+if __name__ == "__main__":
+    main()
