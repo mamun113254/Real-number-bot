@@ -1,1 +1,1 @@
-worker: npm install && node baileys_server.js & python bot.py
+worker: bash start.sh
