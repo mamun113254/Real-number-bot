@@ -1,32 +1,37 @@
 #!/bin/bash
-set -e
 
 echo "=========================================="
 echo "🚀 Starting Earning Hub Bot Services..."
 echo "=========================================="
 
-# Install npm packages if node_modules missing
-if [ ! -d "node_modules" ]; then
-    echo "📦 Installing npm packages..."
-    npm install
+# Install Node.js if not found
+if ! command -v node &> /dev/null; then
+    echo "📦 Installing Node.js..."
+    apt-get update -qq
+    apt-get install -y -qq curl
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
+    apt-get install -y -qq nodejs
+    echo "✅ Node.js installed: $(node -v)"
+else
+    echo "✅ Node.js already available: $(node -v)"
 fi
 
-# Install python packages if needed
-echo "🐍 Checking Python packages..."
-pip install -r requirements.txt --quiet
+# Install npm packages
+echo "📦 Installing npm packages..."
+npm install --silent
+
+# Install python packages
+echo "🐍 Installing Python packages..."
+pip install python-telegram-bot==20.7 pyotp --quiet
 
 # Start Baileys server in background
 echo "📱 Starting Baileys server..."
 node baileys_server.js &
 BAILEYS_PID=$!
-echo "✅ Baileys server started (PID: $BAILEYS_PID)"
+echo "✅ Baileys started (PID: $BAILEYS_PID)"
 
-# Wait a bit for Baileys to initialize
 sleep 3
 
-# Start Python bot (foreground - keeps container alive)
+# Start Python bot
 echo "🤖 Starting Telegram bot..."
 python bot.py
-
-# If bot exits, kill baileys too
-kill $BAILEYS_PID 2>/dev/null || true
