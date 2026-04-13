@@ -1,14 +1,32 @@
 #!/bin/bash
-echo "🔧 Installing Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - 2>/dev/null
-apt-get install -y nodejs 2>/dev/null || true
+set -e
 
-echo "📦 Installing npm packages..."
-npm install
+echo "=========================================="
+echo "🚀 Starting Earning Hub Bot Services..."
+echo "=========================================="
 
-echo "🚀 Starting services..."
+# Install npm packages if node_modules missing
+if [ ! -d "node_modules" ]; then
+    echo "📦 Installing npm packages..."
+    npm install
+fi
+
+# Install python packages if needed
+echo "🐍 Checking Python packages..."
+pip install -r requirements.txt --quiet
+
+# Start Baileys server in background
+echo "📱 Starting Baileys server..."
 node baileys_server.js &
-echo "✅ Baileys server started (PID: $!)"
+BAILEYS_PID=$!
+echo "✅ Baileys server started (PID: $BAILEYS_PID)"
 
-echo "✅ Starting Telegram bot..."
+# Wait a bit for Baileys to initialize
+sleep 3
+
+# Start Python bot (foreground - keeps container alive)
+echo "🤖 Starting Telegram bot..."
 python bot.py
+
+# If bot exits, kill baileys too
+kill $BAILEYS_PID 2>/dev/null || true
