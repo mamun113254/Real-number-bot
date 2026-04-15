@@ -3,6 +3,10 @@
 # pip install python-telegram-bot pyotp aiohttp
 # =========================================================
 
+# Force system packages, bypass .venv
+import sys
+sys.path = [p for p in sys.path if ".venv" not in p]
+
 import os, json, re, asyncio, logging, random, string, time
 from datetime import datetime, timezone
 from pathlib import Path
