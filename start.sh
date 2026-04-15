@@ -3,8 +3,9 @@ echo "======================================="
 echo "📱 Starting Baileys WhatsApp Server..."
 echo "======================================="
 
-# Install dependencies fresh (bypass .venv)
-pip install --break-system-packages --force-reinstall python-telegram-bot==20.7 pyotp aiohttp 2>/dev/null
+# Remove broken .venv and install correct version
+rm -rf /app/.venv
+pip install --break-system-packages python-telegram-bot==20.7 pyotp aiohttp
 
 # Start Baileys (Node)
 if command -v node &> /dev/null; then
@@ -15,6 +16,7 @@ else
     echo "📦 Node: NOT FOUND"
 fi
 
+echo "======================================="
 echo "🚀 Starting UPDATE Otp Bot Services..."
 echo "======================================="
 
