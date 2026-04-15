@@ -1,18 +1,39 @@
 #!/bin/bash
-echo "🚀 Starting Earning Hub Bot..."
 
-# Baileys server background এ চালাও
-echo "📱 Starting Baileys WhatsApp Server..."
-node baileys_server.js &
-BAILEYS_PID=$!
-echo "✅ Baileys Server PID: $BAILEYS_PID"
+echo "======================================="
+echo "🚀 Starting UPDATE Otp Bot Services..."
+echo "======================================="
 
-# 3 সেকেন্ড অপেক্ষা করো
-sleep 3
+# PATH fix
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
-# Main bot চালাও
-echo "🤖 Starting Telegram Bot..."
-node bot.js
+echo "📦 Node: $(node --version 2>/dev/null || echo NOT FOUND)"
+echo "🐍 Python: $(python3 --version 2>/dev/null || echo NOT FOUND)"
 
-# Bot বন্ধ হলে Baileys ও বন্ধ করো
-kill $BAILEYS_PID 2>/dev/null
+# ─── Baileys WhatsApp Server ───
+if [ -f "baileys_server.js" ]; then
+  echo "📱 Starting Baileys WhatsApp Server..."
+  node baileys_server.js &
+  echo "✅ Baileys Server PID: $!"
+  sleep 3
+fi
+
+# ─── Telegram Bot (Node.js) ───
+if [ -f "bot.js" ]; then
+  echo "🤖 Starting Telegram Bot..."
+  node bot.js &
+  echo "✅ Telegram Bot PID: $!"
+fi
+
+# ─── Python Bot ───
+if [ -f "bot.py" ]; then
+  echo "🐍 Starting Python Bot..."
+  python3 bot.py &
+  echo "✅ Python Bot PID: $!"
+fi
+
+echo "======================================="
+echo "✅ All services started!"
+echo "======================================="
+
+wait
