@@ -1,20 +1,25 @@
-const express = require("express");
+/**
+ * Baileys WhatsApp Server
+ * Railway deployment ready
+ */
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } = require("@whiskeysockets/baileys");
-const pino = require("pino");
-const QRCode = require("qrcode");
-const path = require("path");
+
+const express = require("express");
 const fs = require("fs");
+const path = require("path");
+const pino = require("pino");
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.BAILEYS_PORT || 3000;
-
+const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
 const SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
 
@@ -22,144 +27,270 @@ if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
-// Store active sockets
-const sockets = {};
-const qrCodes = {};
-const connectionStatus = {};
+// ─── Active sockets store ───
+const sockets = {}; // { userId: socket }
+const connectionStatus = {}; // { userId: "connected" | "disconnected" }
 
-async function createSession(sessionId) {
-  const sessionPath = path.join(SESSIONS_DIR, sessionId);
-  if (!fs.existsSync(sessionPath)) {
-    fs.mkdirSync(sessionPath, { recursive: true });
+// ─── Logger (silent) ───
+const logger = pino({ level: "silent" });
+
+// ─── Start session for a user ───
+async function startSession(userId) {
+  if (sockets[userId]) {
+    console.log(`⚠️ Session already exists for ${userId}`);
+    return;
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  const sessionDir = path.join(SESSIONS_DIR, userId);
+  if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     version,
-    auth: state,
-    logger: pino({ level: "silent" }),
+    logger,
     printQRInTerminal: false,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
   });
 
-  sockets[sessionId] = sock;
-  connectionStatus[sessionId] = "connecting";
+  sockets[userId] = sock;
+  connectionStatus[userId] = "disconnected";
+
+  sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect } = update;
 
-    if (qr) {
-      try {
-        qrCodes[sessionId] = await QRCode.toDataURL(qr);
-        connectionStatus[sessionId] = "qr_ready";
-        console.log(`📱 QR ready for session: ${sessionId}`);
-      } catch (e) {
-        console.error("QR error:", e);
-      }
+    if (connection === "open") {
+      connectionStatus[userId] = "connected";
+      console.log(`✅ WhatsApp connected: ${userId}`);
     }
 
     if (connection === "close") {
+      connectionStatus[userId] = "disconnected";
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      connectionStatus[sessionId] = "disconnected";
-      console.log(`🔴 Session ${sessionId} disconnected. Reconnect: ${shouldReconnect}`);
+
+      console.log(`🔴 WhatsApp disconnected: ${userId}, reconnect: ${shouldReconnect}`);
+
+      delete sockets[userId];
+
       if (shouldReconnect) {
-        setTimeout(() => createSession(sessionId), 5000);
+        setTimeout(() => startSession(userId), 5000);
+      } else {
+        // Logged out — session delete করো
+        try {
+          fs.rmSync(path.join(SESSIONS_DIR, userId), { recursive: true, force: true });
+        } catch (e) {}
+        delete connectionStatus[userId];
       }
     }
-
-    if (connection === "open") {
-      connectionStatus[sessionId] = "connected";
-      qrCodes[sessionId] = null;
-      console.log(`✅ Session ${sessionId} connected!`);
-    }
   });
-
-  sock.ev.on("creds.update", saveCreds);
 
   return sock;
 }
 
-// ─── API Routes ───
-
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", sessions: Object.keys(sockets) });
-});
-
-// Create/get session
-app.post("/session/:sessionId", async (req, res) => {
-  const { sessionId } = req.params;
+// ─── Disconnect session ───
+async function disconnectSession(userId) {
   try {
-    if (!sockets[sessionId]) {
-      await createSession(sessionId);
+    if (sockets[userId]) {
+      await sockets[userId].logout();
+      delete sockets[userId];
     }
-    res.json({ success: true, sessionId, status: connectionStatus[sessionId] });
+    connectionStatus[userId] = "disconnected";
+    // Session files delete করো
+    const sessionDir = path.join(SESSIONS_DIR, userId);
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+    delete connectionStatus[userId];
+    console.log(`🔴 Logged out: ${userId}`);
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    console.error(`Logout error ${userId}:`, e.message);
   }
-});
+}
 
-// Get QR code
-app.get("/session/:sessionId/qr", (req, res) => {
-  const { sessionId } = req.params;
-  const qr = qrCodes[sessionId];
-  const status = connectionStatus[sessionId];
-
-  if (status === "connected") {
-    return res.json({ success: true, connected: true });
+// ─── Boot: existing sessions restore করো ───
+async function restoreExistingSessions() {
+  try {
+    if (!fs.existsSync(SESSIONS_DIR)) return;
+    const dirs = fs.readdirSync(SESSIONS_DIR);
+    for (const userId of dirs) {
+      const sessionDir = path.join(SESSIONS_DIR, userId);
+      if (fs.statSync(sessionDir).isDirectory()) {
+        console.log(`🔄 Restoring session: ${userId}`);
+        await startSession(userId);
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  } catch (e) {
+    console.error("Restore sessions error:", e.message);
   }
-  if (!qr) {
-    return res.json({ success: false, message: "QR not ready yet. Try again in a moment." });
-  }
-  res.json({ success: true, qr, status });
-});
+}
 
-// Get session status
-app.get("/session/:sessionId/status", (req, res) => {
-  const { sessionId } = req.params;
+// ══════════════════════════════════════════
+//               API ENDPOINTS
+// ══════════════════════════════════════════
+
+// ─── Health check ───
+app.get("/", (req, res) => {
   res.json({
-    success: true,
-    sessionId,
-    status: connectionStatus[sessionId] || "not_started",
-    connected: connectionStatus[sessionId] === "connected",
+    status: "ok",
+    message: "Baileys WhatsApp Server Running",
+    sessions: Object.keys(sockets).length,
   });
 });
 
-// Send message
-app.post("/send", async (req, res) => {
-  const { sessionId, number, message } = req.body;
-  if (!sessionId || !number || !message) {
-    return res.status(400).json({ success: false, error: "sessionId, number, message required" });
-  }
+// ─── Start session ───
+app.post("/start", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
 
-  const sock = sockets[sessionId];
-  if (!sock || connectionStatus[sessionId] !== "connected") {
-    return res.status(400).json({ success: false, error: "Session not connected" });
+  try {
+    await startSession(userId.toString());
+    res.json({ success: true, message: "Session started" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Get pairing code ───
+app.post("/pair", async (req, res) => {
+  const { phone, userId } = req.body;
+  if (!phone || !userId)
+    return res.status(400).json({ error: "phone and userId required" });
+
+  try {
+    const uid = userId.toString();
+    let sock = sockets[uid];
+
+    // যদি already connected থাকে
+    if (sock && connectionStatus[uid] === "connected") {
+      return res.json({ connected: true });
+    }
+
+    // নতুন session start করো
+    if (!sock) {
+      sock = await startSession(uid);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+
+    // Pairing code request করো
+    const digits = phone.replace(/\D/g, "");
+    const code = await sock.requestPairingCode(digits);
+
+    console.log(`🔑 Pairing code for +${digits}: ${code}`);
+    res.json({ code, success: true });
+  } catch (e) {
+    console.error("Pair error:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Check status ───
+app.get("/status", (req, res) => {
+  const userId = req.query.userId;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const uid = userId.toString();
+  const connected =
+    !!sockets[uid] && connectionStatus[uid] === "connected";
+
+  res.json({ connected, userId: uid });
+});
+
+// ─── Check WhatsApp numbers ───
+app.post("/check", async (req, res) => {
+  const { numbers, userId } = req.body;
+  if (!numbers || !userId)
+    return res.status(400).json({ error: "numbers and userId required" });
+
+  const uid = userId.toString();
+  const sock = sockets[uid];
+
+  if (!sock || connectionStatus[uid] !== "connected") {
+    return res.status(400).json({ error: "Not connected" });
   }
 
   try {
-    const jid = number.includes("@") ? number : `${number}@s.whatsapp.net`;
-    await sock.sendMessage(jid, { text: message });
-    res.json({ success: true, message: "Sent!" });
+    const results = {};
+    for (const num of numbers) {
+      try {
+        const digits = num.replace(/\D/g, "");
+        const jid = digits + "@s.whatsapp.net";
+        const [result] = await sock.onWhatsApp(jid);
+        results[digits] = result?.exists === true;
+      } catch (e) {
+        results[num] = null;
+      }
+    }
+    res.json({ results, success: true });
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Delete session
-app.delete("/session/:sessionId", (req, res) => {
-  const { sessionId } = req.params;
-  if (sockets[sessionId]) {
-    sockets[sessionId].end();
-    delete sockets[sessionId];
-    delete qrCodes[sessionId];
-    delete connectionStatus[sessionId];
+// ─── Disconnect ───
+app.post("/disconnect", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  try {
+    await disconnectSession(userId.toString());
+    res.json({ success: true, message: "Disconnected" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  res.json({ success: true, message: "Session removed" });
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Baileys WhatsApp Server running on port ${PORT}`);
+// ─── Send message (optional) ───
+app.post("/send", async (req, res) => {
+  const { userId, to, message } = req.body;
+  if (!userId || !to || !message)
+    return res.status(400).json({ error: "userId, to, message required" });
+
+  const uid = userId.toString();
+  const sock = sockets[uid];
+
+  if (!sock || connectionStatus[uid] !== "connected") {
+    return res.status(400).json({ error: "Not connected" });
+  }
+
+  try {
+    const digits = to.replace(/\D/g, "");
+    const jid = digits + "@s.whatsapp.net";
+    await sock.sendMessage(jid, { text: message });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════
+//               START SERVER
+// ══════════════════════════════════════════
+app.listen(PORT, async () => {
+  console.log("=====================================");
+  console.log(`🚀 Baileys Server running on port ${PORT}`);
+  console.log(`📁 Sessions: ${SESSIONS_DIR}`);
+  console.log("=====================================");
+
+  // Existing sessions restore করো
+  await restoreExistingSessions();
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err.message);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err?.message || err);
 });
