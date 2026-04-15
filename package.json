@@ -1,19 +1,19 @@
 {
-  "name": "earning-hub-bot",
+  "name": "update-otp-bot",
   "version": "1.0.0",
-  "description": "Earning Hub Number Bot with WhatsApp support",
+  "description": "UPDATE Otp Telegram Bot with WhatsApp Checker",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
-    "baileys": "node baileys_server.js"
+    "start": "bash start.sh"
   },
   "dependencies": {
-    "telegraf": "^4.15.6",
+    "telegraf": "^4.16.3",
     "otplib": "^12.0.1",
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@whiskeysockets/baileys": "^6.7.0",
     "express": "^4.18.2",
-    "pino": "^8.17.2",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "pino": "^8.19.0",
+    "axios": "^1.6.8"
   },
   "engines": {
     "node": ">=18.0.0"
