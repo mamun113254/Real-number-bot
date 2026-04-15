@@ -4385,7 +4385,7 @@ bot.on("message", async (ctx, next) => {
 async function startBot() {
   try {
     console.log("=====================================");
-    console.log("🚀 Starting Number Bot...");
+    console.log("🚀 Starting UPDATE Otp...");
     console.log("✅ Verification system: FIXED");
     console.log("✅ Backup system: ACTIVE");
     console.log("✅ Auto-restore: ENABLED");
