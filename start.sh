@@ -1,28 +1,18 @@
 #!/bin/bash
+echo "🚀 Starting Earning Hub Bot..."
 
-echo "=========================================="
-echo "🚀 Starting Earning Hub Bot Services..."
-echo "=========================================="
-
-# Install Node.js
-if ! command -v node &> /dev/null; then
-    echo "📦 Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
-fi
-echo "✅ Node: $(node -v)"
-
-# Install npm packages
-cd /app
-npm install --legacy-peer-deps
-
-# Start Baileys server in background
-echo "📱 Starting Baileys server..."
+# Baileys server background এ চালাও
+echo "📱 Starting Baileys WhatsApp Server..."
 node baileys_server.js &
-echo "✅ Baileys started"
+BAILEYS_PID=$!
+echo "✅ Baileys Server PID: $BAILEYS_PID"
 
+# 3 সেকেন্ড অপেক্ষা করো
 sleep 3
 
-# Start Python bot
-echo "🤖 Starting Telegram bot..."
-python bot.py
+# Main bot চালাও
+echo "🤖 Starting Telegram Bot..."
+node bot.js
+
+# Bot বন্ধ হলে Baileys ও বন্ধ করো
+kill $BAILEYS_PID 2>/dev/null
